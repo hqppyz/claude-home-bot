@@ -2,12 +2,10 @@ import { join } from "node:path";
 import { Message, type ChatInputCommandInteraction, type SendableChannels } from "discord.js";
 import { claudeHome, Session, type Reply } from "./claude";
 import type { Config } from "./config";
+import { LiveReply, type Outlet, type RawEvent } from "./log";
 
 // A session with no turn for this long exits; the next message resumes the chat
 const IDLE_MS = 5 * 60_000;
-
-// Discord's message length limit
-const MAX_MESSAGE = 2000;
 
 // A typing indicator lasts about 10 seconds, so it's renewed before that
 const TYPING_MS = 8_000;
@@ -44,19 +42,6 @@ function merge(batch: readonly Input[]): string {
   return (batch as Message[]).map((m) => `${m.author.displayName}: ${m.content}`).join("\n\n");
 }
 
-// Splits at the last newline that fits, or hard at the limit
-function chunks(text: string): string[] {
-  const out: string[] = [];
-  while (text.length > MAX_MESSAGE) {
-    const cut = text.lastIndexOf("\n", MAX_MESSAGE);
-    const at = cut > 0 ? cut : MAX_MESSAGE;
-    out.push(text.slice(0, at));
-    text = text.slice(at).replace(/^\n/, "");
-  }
-  if (text) out.push(text);
-  return out;
-}
-
 // Shows "typing" in the channel until the returned function is called
 function typing(channel: SendableChannels): () => void {
   const send = () => channel.sendTyping().catch(() => {});
@@ -65,25 +50,23 @@ function typing(channel: SendableChannels): () => void {
   return () => clearInterval(timer);
 }
 
-async function sendReply(to: Input, reply: Reply) {
-  const text = reply.isError ? `Claude failed: ${reply.text}` : reply.text || "(empty reply)";
-  if (!(to instanceof Message)) {
-    const { interaction } = to;
-    if (Date.now() - interaction.createdTimestamp < INTERACTION_MS) {
-      for (const [i, content] of chunks(text).entries()) {
-        await (i === 0 ? interaction.editReply(content) : interaction.followUp(content));
-      }
-      return;
-    }
-    const channel = interaction.channel as SendableChannels;
-    for (const content of chunks(`${interaction.user} ${text}`)) await channel.send(content);
-    return;
+// The turn's messages answer the input: a message gets a reply, a command its
+// deferred reply while the interaction lasts. Later messages go to the channel.
+function outlet(to: Input): Outlet {
+  if (to instanceof Message) {
+    const channel = to.channel as SendableChannels;
+    return {
+      send: (content, i) => channel.send({ content, ...(i === 0 ? { reply: { messageReference: to.id, failIfNotExists: false } } : {}) }),
+      edit: (message, content) => message.edit(content),
+    };
   }
-  const channel = to.channel as SendableChannels;
-  for (const [i, content] of chunks(text).entries()) {
-    const reference = i === 0 ? { reply: { messageReference: to.id, failIfNotExists: false } } : {};
-    await channel.send({ content, ...reference });
-  }
+  const { interaction } = to;
+  const channel = interaction.channel as SendableChannels;
+  const fresh = () => Date.now() - interaction.createdTimestamp < INTERACTION_MS;
+  return {
+    send: (content, i) => (i === 0 && fresh() ? interaction.editReply(content) : channel.send(content)),
+    edit: (message, content, i) => (i === 0 && fresh() ? interaction.editReply(content) : message.edit(content)),
+  };
 }
 
 // Every channel's chat, kept in <data>/chats.json so a restart picks each one up
@@ -170,9 +153,10 @@ export class Chat {
         const last = batch.at(-1)!;
         // A deferred command already shows that the bot is thinking
         const stopTyping = last instanceof Message ? typing(last.channel as SendableChannels) : () => {};
+        const live = new LiveReply(outlet(last));
         try {
-          const reply = await this.turn(merge(batch));
-          await sendReply(last, reply).catch((e) => console.error(`failed to reply in ${this.dir}:`, e));
+          const reply = await this.turn(merge(batch), (event) => live.add(event));
+          await live.finish(reply);
         } finally {
           stopTyping();
         }
@@ -184,19 +168,19 @@ export class Chat {
     this.idle = setTimeout(() => this.stop(), IDLE_MS);
   }
 
-  private async turn(prompt: string): Promise<Reply> {
+  private async turn(prompt: string, onEvent: (event: RawEvent) => void): Promise<Reply> {
     const saved = this.chats.get(this.channelId);
     // Claude keeps conversations per project directory, so a new directory starts over
     this.session ??= await Session.start(this.dir, this.home, saved?.dir === this.dir ? saved.sessionId : undefined);
     const session = this.session;
-    const reply = await session.send(prompt);
+    const reply = await session.send(prompt, onEvent);
     if (session.dead) {
       this.session = undefined;
       // A resume that dies before starting means the conversation is gone
       if (session.resumed && !session.started) {
         console.error(`chat in ${this.dir} could not resume, starting over: ${reply.text}`);
         this.chats.save(this.channelId, { dir: this.dir, lastMessageId: saved?.lastMessageId });
-        return this.turn(prompt);
+        return this.turn(prompt, onEvent);
       }
     }
     this.chats.save(this.channelId, { ...saved, dir: this.dir, sessionId: session.sessionId });

@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { Config } from "./config";
+import type { RawEvent } from "./log";
 
 // Claude Code keeps settings, credentials and transcripts under CLAUDE_CONFIG_DIR,
 // so pointing it into the data dir keeps the bot's sessions out of the user's ~/.claude.
@@ -168,6 +169,7 @@ export class Session {
   started = false;
   dead = false;
   private turn: PromiseWithResolvers<Reply> | undefined;
+  private onEvent: (event: RawEvent) => void = () => {};
   private readonly stderr: Promise<string>;
 
   private constructor(
@@ -194,11 +196,13 @@ export class Session {
     return new Session(proc, resume);
   }
 
-  // One turn at a time; resolves with the turn's result, or an error if the process dies
-  send(prompt: string): Promise<Reply> {
+  // One turn at a time; resolves with the turn's result, or an error if the
+  // process dies. onEvent sees every event of the turn, the result included.
+  send(prompt: string, onEvent: (event: RawEvent) => void = () => {}): Promise<Reply> {
     if (this.turn) throw new Error("a turn is already running");
     if (this.dead) return Promise.resolve({ text: "claude is not running", isError: true });
     this.turn = Promise.withResolvers();
+    this.onEvent = onEvent;
     try {
       this.proc.stdin.write(`${JSON.stringify({ type: "user", message: { role: "user", content: prompt } })}\n`);
       this.proc.stdin.flush();
@@ -221,6 +225,7 @@ export class Session {
   }
 
   private handle(event: Event) {
+    if (this.turn) this.onEvent(event);
     if (event.type === "system" && event.subtype === "init") {
       this.started = true;
       this.sessionId = event.session_id;
