@@ -1,17 +1,81 @@
-import { basename } from "node:path";
+import { basename, join } from "node:path";
 import { ChannelType, type CategoryChannel, type Guild, type TextChannel } from "discord.js";
 
-// Managed channels carry their directory on a marker line in the topic.
-// Unmarked channels are never deleted, so the category can hold other
+// Which directory each managed channel holds, kept in the data dir.
+// Unmanaged channels are never deleted, so the category can hold other
 // channels too; one whose name matches a new directory is adopted instead.
-const MARKER = "claude-home-bot:";
+export class ChannelDirs {
+  private writing: Promise<unknown> = Promise.resolve();
 
-const markerFor = (dir: string) => `${MARKER} ${dir}`;
+  private constructor(
+    private readonly path: string,
+    private readonly dirs: Map<string, string>,
+  ) {}
 
-export function dirOf(channel: TextChannel): string | undefined {
-  const line = (channel.topic ?? "").split("\n").find((l) => l.startsWith(MARKER));
-  return line?.slice(MARKER.length).trim();
+  static async load(dataDir: string): Promise<ChannelDirs> {
+    const path = join(dataDir, "channels.json");
+    const file = Bun.file(path);
+    const saved: Record<string, string> = (await file.exists()) ? await file.json() : {};
+    return new ChannelDirs(path, new Map(Object.entries(saved)));
+  }
+
+  get(channelId: string): string | undefined {
+    return this.dirs.get(channelId);
+  }
+
+  set(channelId: string, dir: string) {
+    this.dirs.set(channelId, dir);
+    this.save();
+  }
+
+  delete(channelId: string) {
+    if (this.dirs.delete(channelId)) this.save();
+  }
+
+  private save() {
+    const json = JSON.stringify(Object.fromEntries(this.dirs), null, 2);
+    this.writing = this.writing.then(() => Bun.write(this.path, json)).catch((e) => console.error("failed to save channels:", e));
+  }
 }
+
+// Earlier versions kept a managed channel's directory on this line of its topic
+const LEGACY_MARKER = "claude-home-bot:";
+
+// The directory on a legacy marker line, and the topic without that line
+export function legacyDir(topic: string | null): { dir?: string; topic: string } {
+  const lines = (topic ?? "").split("\n");
+  const marker = lines.find((l) => l.startsWith(LEGACY_MARKER));
+  return { dir: marker?.slice(LEGACY_MARKER.length).trim(), topic: lines.filter((l) => l !== marker).join("\n") };
+}
+
+// The status line the bot keeps as a channel's topic, found by its shape so
+// updating one part leaves the others alone. Lines of no known shape, like an
+// old format's, are dropped so the topic fixes itself.
+// All on one line, as "<model> · <effort> · <mode> · <cost>"
+export interface Status {
+  readonly model?: string;
+  readonly effort?: string;
+  // The session's permission mode
+  readonly mode?: string;
+  // The last turn's tokens and cost, as "<tokens> · $<cost>"
+  readonly cost?: string;
+}
+
+const STATUS_LINE = /^(\S+) · (\S+) · ([a-zA-Z]+)(?: · (.+ · \$[\d.]+))?$/;
+
+export function parseTopic(topic: string | null): Status {
+  const lines = (topic ?? "").split("\n").filter(Boolean);
+  const [, model, effort, mode, cost] = lines.map((l) => STATUS_LINE.exec(l)).find(Boolean) ?? [];
+  return { model, effort, mode, cost };
+}
+
+// The topic with the given parts replaced and the others kept
+export function withStatus(topic: string | null, status: Status): string {
+  const { model, effort, mode, cost } = { ...parseTopic(topic), ...stripUndefined(status) };
+  return model && effort && mode ? [model, effort, mode, cost].filter(Boolean).join(" · ") : "";
+}
+
+const stripUndefined = (status: Status) => Object.fromEntries(Object.entries(status).filter(([, v]) => v !== undefined));
 
 // Discord text channel names: lowercase, no spaces, at most 100 characters
 function channelName(dir: string): string {
@@ -24,14 +88,15 @@ export class CategorySync {
   private constructor(
     private readonly guild: Guild,
     private readonly category: CategoryChannel,
+    private readonly dirs: ChannelDirs,
   ) {}
 
-  static async open(guild: Guild, categoryId: string): Promise<CategorySync> {
+  static async open(guild: Guild, categoryId: string, dirs: ChannelDirs): Promise<CategorySync> {
     const category = await guild.channels.fetch(categoryId).catch(() => null);
     if (category?.type !== ChannelType.GuildCategory) {
       throw new Error(`category ${categoryId} not found in server ${guild.name}`);
     }
-    return new CategorySync(guild, category);
+    return new CategorySync(guild, category, dirs);
   }
 
   get name(): string {
@@ -49,11 +114,11 @@ export class CategorySync {
   // orders managed channels like wanted.
   async reconcile(wanted: readonly string[]): Promise<void> {
     const seen = new Set<string>();
-    const unmarked: TextChannel[] = [];
+    const unmanaged: TextChannel[] = [];
     for (const channel of this.textChannels()) {
-      const dir = dirOf(channel);
+      const dir = this.dirs.get(channel.id) ?? (await this.migrate(channel));
       if (dir === undefined) {
-        unmarked.push(channel);
+        unmanaged.push(channel);
         continue;
       }
       if (wanted.includes(dir) && !seen.has(dir)) {
@@ -61,6 +126,7 @@ export class CategorySync {
         continue;
       }
       await channel.delete(`directory gone: ${dir}`);
+      this.dirs.delete(channel.id);
       console.log(`deleted #${channel.name} (${dir})`);
     }
 
@@ -68,10 +134,10 @@ export class CategorySync {
       if (seen.has(dir)) continue;
       const name = channelName(dir);
 
-      const existing = unmarked.findIndex((channel) => channel.name === name);
+      const existing = unmanaged.findIndex((channel) => channel.name === name);
       if (existing !== -1) {
-        const [channel] = unmarked.splice(existing, 1) as [TextChannel];
-        await channel.setTopic(channel.topic ? `${channel.topic}\n${markerFor(dir)}` : markerFor(dir));
+        const [channel] = unmanaged.splice(existing, 1) as [TextChannel];
+        this.dirs.set(channel.id, dir);
         console.log(`adopted #${channel.name} (${dir})`);
         continue;
       }
@@ -80,27 +146,37 @@ export class CategorySync {
         name,
         type: ChannelType.GuildText,
         parent: this.category.id,
-        topic: markerFor(dir),
         reason: `directory found: ${dir}`,
       });
+      this.dirs.set(channel.id, dir);
       console.log(`created #${channel.name} (${dir})`);
     }
 
     await this.order(wanted);
   }
 
+  // Moves a legacy marker's directory out of the topic and into the store
+  private async migrate(channel: TextChannel): Promise<string | undefined> {
+    const { dir, topic } = legacyDir(channel.topic);
+    if (dir === undefined) return undefined;
+    this.dirs.set(channel.id, dir);
+    await channel.setTopic(topic);
+    console.log(`moved the directory of #${channel.name} out of its topic (${dir})`);
+    return dir;
+  }
+
   // Managed channels take the slots managed channels already occupy, in wanted
-  // order; unmarked channels keep their place.
+  // order; unmanaged channels keep their place.
   private async order(wanted: readonly string[]): Promise<void> {
     const current = this.textChannels();
     const managed = new Map<string, TextChannel>();
     for (const channel of current) {
-      const dir = dirOf(channel);
+      const dir = this.dirs.get(channel.id);
       if (dir !== undefined) managed.set(dir, channel);
     }
 
     const queue = wanted.flatMap((dir) => managed.get(dir) ?? []);
-    const target = current.map((channel) => (dirOf(channel) === undefined ? channel : queue.shift()!));
+    const target = current.map((channel) => (this.dirs.get(channel.id) === undefined ? channel : queue.shift()!));
     if (target.every((channel, i) => channel === current[i])) return;
 
     await this.guild.channels.setPositions(target.map((channel, position) => ({ channel, position })));

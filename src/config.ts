@@ -14,6 +14,10 @@ export type PathConfig =
 
 export type AutoEntry = Extract<PathConfig, { mode: "auto" }>;
 
+// Claude's effort levels, as `claude --effort` takes them
+export const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+export type Effort = (typeof EFFORTS)[number];
+
 export interface Config {
   // Absolute; holds config.yaml and the bot's Claude home
   readonly dataDir: string;
@@ -23,6 +27,10 @@ export interface Config {
     readonly serverId: string;
     // Users who can manage the bot; doesn't limit activity in channels
     readonly adminIds: readonly string[];
+  };
+  readonly claude: {
+    // Each session starts at this effort; /effort changes it until the session ends
+    readonly effort: Effort;
   };
 }
 
@@ -70,6 +78,12 @@ function snowflake(v: unknown, where: string): string {
   }
   if (typeof v !== "string" || !/^\d+$/.test(v)) fail(where, "expected a Discord ID");
   return v;
+}
+
+function effort(v: unknown, where: string): Effort {
+  if (v === undefined || v === null) return "low";
+  if (!EFFORTS.includes(v as Effort)) fail(where, `expected one of ${EFFORTS.join(", ")}`);
+  return v as Effort;
 }
 
 function patterns(v: unknown, where: string): readonly string[] {
@@ -127,11 +141,15 @@ export async function loadConfig(dataDir: string): Promise<Config> {
   const file = Bun.file(configPath);
   const raw: unknown = (await file.exists()) ? (Bun.YAML.parse(await file.text()) ?? {}) : {};
   if (!isRecord(raw)) fail(configPath, "expected a mapping at top level");
-  checkKeys(raw, ["paths", "discord"], configPath);
+  checkKeys(raw, ["paths", "discord", "claude"], configPath);
 
   const discord = raw.discord ?? {};
   if (!isRecord(discord)) fail("discord", "expected a mapping");
   checkKeys(discord, ["token", "server-id", "admin-id"], "discord");
+
+  const claude = raw.claude ?? {};
+  if (!isRecord(claude)) fail("claude", "expected a mapping");
+  checkKeys(claude, ["effort"], "claude");
 
   // PATHS holds the whole list as YAML, e.g. PATHS='[{/home/me: {mode: manual}}]'
   let [paths, pathsWhere] = pick(raw, ["paths"]);
@@ -145,6 +163,9 @@ export async function loadConfig(dataDir: string): Promise<Config> {
       token: str(...pick(discord, ["discord", "token"])),
       serverId: snowflake(...pick(discord, ["discord", "server-id"])),
       adminIds: snowflakes(...pick(discord, ["discord", "admin-id"])),
+    },
+    claude: {
+      effort: effort(...pick(claude, ["claude", "effort"])),
     },
   });
 }

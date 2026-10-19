@@ -32,69 +32,127 @@ function short(text: unknown): string {
 // A log line, in small text so Claude's own text stands out
 const note = (line: string) => `-# ${escapeMarkdown(line)}`;
 
-const seconds = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
+const count = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
 
+// Each kind of token apart, since they're priced apart: cache reads cost a
+// tenth of fresh input, cache writes more than it
 function tokens(usage: RawEvent | undefined): string {
-  if (!usage) return "0";
-  const total = ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"].reduce(
-    (sum, key) => sum + (usage[key] ?? 0),
-    0,
-  );
-  return total >= 1000 ? `${(total / 1000).toFixed(1)}k` : String(total);
+  const kinds: [string, string][] = [
+    ["cache_read_input_tokens", "cache read"],
+    ["cache_creation_input_tokens", "cache write"],
+    ["input_tokens", "in"],
+    ["output_tokens", "out"],
+  ];
+  return kinds.map(([key, label]) => `${count(usage?.[key] ?? 0)} ${label}`).join(" · ");
 }
 
 // What a content block of an assistant or user message did; Claude's text goes as is
-function block(content: RawEvent): string {
+function block(content: RawEvent, asked: Set<string>): string[] {
   switch (content.type) {
     case "text":
-      return content.text;
+      return [content.text];
+    // The typing indicator shows thinking instead
     case "thinking":
-      return note(`thinking · ${short(content.thinking)}`);
+    case "redacted_thinking":
+      return [];
     case "tool_use": {
       const input = content.input ?? {};
+      // The bot asks these questions in their own message
+      if (content.name === "AskUserQuestion" && Array.isArray(input.questions)) {
+        asked.add(content.id);
+        return [];
+      }
       // The field a person would recognize the call by, else the whole input
       const detail = input.command ?? input.file_path ?? input.pattern ?? input.url ?? input.query ?? input.prompt ?? JSON.stringify(input);
-      return note(`tool ${content.name} · ${short(detail)}`);
+      return [note(`tool ${content.name} · ${short(detail)}`)];
     }
     case "tool_result": {
+      // The answers show on the question's own message
+      if (asked.has(content.tool_use_id)) return [];
       const result = Array.isArray(content.content)
         ? content.content.map((part: RawEvent) => part.text ?? `[${part.type}]`).join(" ")
         : content.content;
-      return note(`${content.is_error ? "tool error" : "tool result"} · ${short(result)}`);
+      return [note(`${content.is_error ? "tool error" : "tool result"} · ${short(result)}`)];
     }
     default:
-      return note(String(content.type));
+      return [note(String(content.type))];
   }
 }
 
-// What one event adds to the turn's messages; message events add one entry per content block
-export function describe(event: RawEvent): string[] {
+// A turn's tokens and cost, for the channel topic; local commands have none
+export const cost = (event: RawEvent) =>
+  event.local_command ? undefined : `${tokens(event.usage)} · $${(event.total_cost_usd ?? 0).toFixed(3)}`;
+
+// The session's model and permission mode, from its init event
+export const session = (event: RawEvent) => ({ model: String(event.model), mode: String(event.permissionMode) });
+
+// The effort a turn's /effort command set; the result's text is the only place it shows
+export const effortSet = (event: RawEvent): string | undefined =>
+  event.local_command === "effort" ? /effort level to (\w+)/i.exec(String(event.result ?? ""))?.[1]?.toLowerCase() : undefined;
+
+// Time left as its two largest units: 45m, 2h05m, 4d18h
+function left(ms: number): string {
+  const minutes = Math.max(0, Math.round(ms / 60_000));
+  const [d, h, m] = [Math.floor(minutes / 1440), Math.floor(minutes / 60) % 24, minutes % 60];
+  if (d > 0) return `${d}d${String(h).padStart(2, "0")}h`;
+  if (h > 0) return `${h}h${String(m).padStart(2, "0")}m`;
+  return `${m}m`;
+}
+
+// What's left of the 5-hour window of a rate limit event, in percent, and the time to its reset
+export function usage(event: RawEvent, now = Date.now()): { percent: number; reset?: string } | undefined {
+  const w: { utilization?: number; resetsAt?: number } | undefined = event.rate_limit_info?.unifiedWindows?.five_hour;
+  if (!w) return undefined;
+  const percent = Math.round((1 - (w.utilization ?? 0)) * 100);
+  return { percent, reset: w.resetsAt ? left(w.resetsAt * 1000 - now) : undefined };
+}
+
+// Whether an event is Claude thinking: progress frames, or a message of thinking blocks only
+export function isThinking(event: RawEvent): boolean {
+  if (event.type === "system") return event.subtype === "thinking_tokens";
+  const content = event.message?.content;
+  return (
+    event.type === "assistant" &&
+    Array.isArray(content) &&
+    content.length > 0 &&
+    content.every((c: RawEvent) => c.type === "thinking" || c.type === "redacted_thinking")
+  );
+}
+
+// What one event adds to the turn's messages; message events add one entry per content block.
+// asked collects the ids of the turn's questions, whose results stay hidden too.
+export function describe(event: RawEvent, asked = new Set<string>()): string[] {
   switch (event.type) {
     case "system":
-      if (event.subtype === "init") return [note(`init · ${event.model} · ${event.permissionMode}`)];
+      // The channel topic shows the session's model and mode instead
+      if (event.subtype === "init") return [];
+      // The typing indicator shows thinking instead
+      if (event.subtype === "thinking_tokens") return [];
       break;
     case "assistant":
     case "user": {
       const content = event.message?.content;
       if (typeof content === "string") return [note(`${event.type} · ${short(content)}`)];
-      if (Array.isArray(content)) return content.map(block);
+      if (Array.isArray(content)) return content.flatMap((c: RawEvent) => block(c, asked));
       break;
     }
+    case "control_request":
+      // Permission prompts, like the questions, which the bot asks in their own message
+      return [];
     case "conversation_reset":
       return [note(`conversation reset · ${event.trigger}`)];
     case "rate_limit_event": {
       const info = event.rate_limit_info ?? {};
+      // The bot's status shows usage; the log only shows a limit getting close or hit
+      if (info.status === "allowed") return [];
       const windows = Object.entries(info.unifiedWindows ?? {}).map(
         ([window, w]: [string, any]) => `${window} ${Math.round((w.utilization ?? 0) * 100)}%`,
       );
       return [note(`rate limit · ${[info.status, ...windows].join(" · ")}`)];
     }
-    case "result": {
-      const parts = [event.is_error ? "failed" : "done", seconds(event.duration_ms ?? 0)];
-      if (event.local_command) parts.push(`/${event.local_command}`);
-      else parts.push(`${event.num_turns} turns`, `${tokens(event.usage)} tokens`, `$${(event.total_cost_usd ?? 0).toFixed(3)}`);
-      return [note(parts.join(" · "))];
-    }
+    case "result":
+      // The channel topic shows the turn's cost instead
+      return [];
   }
   return [note(event.subtype ? `${event.type}/${event.subtype}` : String(event.type))];
 }
@@ -117,11 +175,15 @@ export class LiveReply {
   private dirty = false;
   private hasText = false;
 
-  constructor(private readonly outlet: Outlet) {}
+  // asked is shared by the turn's replies, since a question's result comes after it splits them
+  constructor(
+    private readonly outlet: Outlet,
+    private readonly asked = new Set<string>(),
+  ) {}
 
   add(event: RawEvent) {
     if (event.type === "assistant" && event.message?.content?.some?.((c: RawEvent) => c.type === "text")) this.hasText = true;
-    this.push(...describe(event));
+    this.push(...describe(event, this.asked));
   }
 
   // Adds what the events didn't show: an error, or the output of a local

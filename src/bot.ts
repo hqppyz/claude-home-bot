@@ -9,7 +9,8 @@ import {
   type Guild,
   type Message,
 } from "discord.js";
-import { CategorySync, dirOf } from "./channels";
+import { pick } from "./ask";
+import { CategorySync, ChannelDirs, legacyDir } from "./channels";
 import { authenticate } from "./auth";
 import { Chats } from "./chats";
 import { claudeHome, listCommands } from "./claude";
@@ -41,19 +42,24 @@ export async function startBot(config: Config): Promise<never> {
     });
   });
 
-  // Manual channels map to their path; auto channels carry theirs in the topic,
-  // trusted only inside a configured category
+  // Manual channels map to their path; auto channels to the directory they were
+  // made for, trusted only inside a configured category
+  const channelDirs = await ChannelDirs.load(config.dataDir);
   const manual = new Map(config.paths.flatMap((entry) => (entry.mode === "manual" ? [[entry.channelId, entry.path]] : [])));
   const categories = new Set(config.paths.flatMap((entry) => (entry.mode === "auto" ? [entry.categoryId] : [])));
   const dirFor = (channel: Channel): string | undefined => {
     const dir = manual.get(channel.id);
     if (dir !== undefined) return dir;
     if (channel.type !== ChannelType.GuildText || !channel.parentId || !categories.has(channel.parentId)) return undefined;
-    return dirOf(channel);
+    // A legacy marker still counts until the first sync moves it into the store
+    return channelDirs.get(channel.id) ?? legacyDir(channel.topic).dir;
   };
 
   const { promise: authed, resolve: authDone } = Promise.withResolvers<void>();
   const chats = await Chats.load(config, authed);
+
+  // discord.js waits out a rate limit silently, so log it
+  client.rest.on("rateLimited", (info) => console.error(`rate limited on ${info.route} for ${info.retryAfter}ms`));
 
   client.on(Events.MessageCreate, (message) => {
     if (!accepting(message)) return;
@@ -76,6 +82,7 @@ export async function startBot(config: Config): Promise<never> {
     chats.chat(interaction.channelId, dir).add([{ interaction, prompt: promptOf(command, interaction) }]);
   };
   client.on(Events.InteractionCreate, (interaction) => {
+    if (interaction.isStringSelectMenu() && interaction.guildId === serverId) pick(interaction);
     if (!interaction.isChatInputCommand() || interaction.guildId !== serverId) return;
     runCommand(interaction).catch((e) => console.error(`/${interaction.commandName} failed:`, e));
   });
@@ -96,7 +103,7 @@ export async function startBot(config: Config): Promise<never> {
     })
     .catch((e) => console.error("failed to register commands:", e));
   catchUp(guild, chats, dirFor, accepting).catch((e) => console.error("failed to catch up on missed messages:", e));
-  return eventLoop(config, guild);
+  return eventLoop(config, guild, channelDirs);
 }
 
 // Queues the messages sent while the bot was offline, which go out merged into one turn
@@ -126,13 +133,13 @@ async function catchUp(
   }
 }
 
-async function eventLoop(config: Config, guild: Guild): Promise<never> {
+async function eventLoop(config: Config, guild: Guild, channelDirs: ChannelDirs): Promise<never> {
   const autoEntries = config.paths.filter((entry): entry is AutoEntry => entry.mode === "auto");
 
   // One sync per category; several auto entries may share a category
   const syncs = new Map<string, CategorySync>();
   for (const { categoryId } of autoEntries) {
-    if (!syncs.has(categoryId)) syncs.set(categoryId, await CategorySync.open(guild, categoryId));
+    if (!syncs.has(categoryId)) syncs.set(categoryId, await CategorySync.open(guild, categoryId, channelDirs));
   }
 
   const matched = new Map<PathConfig, Set<string>>(config.paths.map((entry) => [entry, new Set()]));

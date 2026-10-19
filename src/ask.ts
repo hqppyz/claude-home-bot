@@ -1,15 +1,19 @@
 import {
   ActionRowBuilder,
-  ComponentType,
+  ContainerBuilder,
   escapeMarkdown,
+  MessageFlags,
+  SeparatorBuilder,
   StringSelectMenuBuilder,
+  TextDisplayBuilder,
   type Message,
   type SendableChannels,
+  type StringSelectMenuInteraction,
 } from "discord.js";
 import type { Question } from "./claude";
 
-// Discord's message length limit
-const MAX_MESSAGE = 2000;
+// Discord's limit on the text of a message made of components
+const MAX_TEXT = 4000;
 
 // Discord's limits on a select menu: options, and the length of a label,
 // description or placeholder
@@ -19,9 +23,33 @@ const MAX_PLACEHOLDER = 150;
 
 const cut = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
 
+const text = (content: string) => new TextDisplayBuilder().setContent(content);
+
+// The questions in one box, each above its menu when it has one and split from the next by a line
+function box(questions: readonly Question[], rows: readonly ActionRowBuilder<StringSelectMenuBuilder>[], footer: string) {
+  const box = new ContainerBuilder();
+  questions.forEach((q, i) => {
+    if (i > 0) box.addSeparatorComponents(new SeparatorBuilder());
+    box.addTextDisplayComponents(text(cut(`**${escapeMarkdown(q.question)}**`, MAX_TEXT / (questions.length + 1))));
+    if (rows[i]) box.addActionRowComponents(rows[i]!);
+  });
+  return box.addTextDisplayComponents(text(footer));
+}
+
+// Questions still waiting for an answer, by the message that asks them
+const open = new Map<string, Asking>();
+
+// A pick in a question's menu. Picks on answered questions, or on questions
+// from before a restart, are acknowledged and do nothing.
+export function pick(interaction: StringSelectMenuInteraction) {
+  open.get(interaction.message.id)?.select(Number(interaction.customId), interaction.values);
+  interaction.deferUpdate().catch(() => {});
+}
+
 // A question waiting in a channel. Each question gets a select menu, and a
 // typed message answers every question still open, for answers the options don't
 // cover. Aborting the signal skips the questions and rejects answered.
+// Answered questions keep their message as is, menus included.
 export class Asking {
   private readonly answers = new Map<number, string>();
   private readonly done = Promise.withResolvers<Record<string, string>>();
@@ -47,35 +75,35 @@ export class Asking {
         );
       return new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu);
     });
-    const content = `${questions.map((q) => `**${escapeMarkdown(q.question)}**`).join("\n")}\n-# Pick below, or type an answer.`;
-    const message: Message = await channel.send({ content: cut(content, MAX_MESSAGE), components: rows });
-
-    const collector = message.createMessageComponentCollector({ componentType: ComponentType.StringSelect });
-    collector.on("collect", (interaction) => {
-      const i = Number(interaction.customId);
-      const options = questions[i]!.options;
-      asking.answers.set(i, interaction.values.map((v) => options[Number(v)]!.label).join(", "));
-      interaction.deferUpdate().catch(() => {});
-      asking.check();
+    // A message of components, so each question sits above its menu and the hint below them all
+    const message: Message = await channel.send({
+      flags: MessageFlags.IsComponentsV2,
+      components: [box(questions, rows, "-# ...or type an answer.")],
     });
+
+    open.set(message.id, asking);
     const skip = () => asking.done.reject(new Error("the questions were skipped"));
     if (signal.aborted) skip();
     else signal.addEventListener("abort", skip, { once: true });
-    // Shows each answer, or that the questions were skipped, in place of the menus
-    const close = (answered: boolean) => {
-      collector.stop();
-      signal.removeEventListener("abort", skip);
-      const lines = questions.map((q, i) => {
-        const answer = asking.answers.get(i);
-        return `**${escapeMarkdown(q.question)}**${answered && answer !== undefined ? `\n${escapeMarkdown(answer)}` : ""}`;
-      });
-      if (!answered) lines.push("-# Skipped.");
-      return message.edit({ content: cut(lines.join("\n"), MAX_MESSAGE), components: [] });
-    };
     asking.answered
-      .then(() => close(true), () => close(false))
-      .catch((e) => console.error("failed to close the question:", e));
+      .catch(() => {
+        // Shows that the questions were skipped in place of the menus
+        return message.edit({ components: [box(questions, [], "-# Skipped.")] });
+      })
+      .catch((e) => console.error("failed to close the question:", e))
+      .finally(() => {
+        open.delete(message.id);
+        signal.removeEventListener("abort", skip);
+      });
     return asking;
+  }
+
+  // A pick in question i's menu, as option indexes
+  select(i: number, values: readonly string[]) {
+    const options = this.questions[i]?.options;
+    if (!options) return;
+    this.answers.set(i, values.map((v) => options[Number(v)]!.label).join(", "));
+    this.check();
   }
 
   // A typed answer, for every question not answered yet

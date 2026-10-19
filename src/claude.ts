@@ -1,6 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import type { Config } from "./config";
+import type { Config, Effort } from "./config";
 import type { RawEvent } from "./log";
 
 // Claude Code keeps settings, credentials and transcripts under CLAUDE_CONFIG_DIR,
@@ -174,6 +174,27 @@ export async function listCommands(dir: string, home: string): Promise<ClaudeCom
   }
 }
 
+// Settings that keep each request small: no skills synced from claude.ai, and
+// built-in skills a chat has little use for kept out of Claude's listing,
+// though they still run as slash commands
+const SETTINGS = {
+  syncClaudeAiSkills: false,
+  syncClaudeAiPlugins: false,
+  skillOverrides: Object.fromEntries(
+    [
+      "dataviz",
+      "claude-api",
+      "run",
+      "plugin-authoring",
+      "security-review",
+      "keybindings-help",
+      "fewer-permission-prompts",
+      "update-config",
+      "loop",
+    ].map((name) => [name, "user-invocable-only"]),
+  ),
+};
+
 // One running `claude` process. It reads turns from stdin until it's closed, so
 // the conversation stays loaded between messages; --resume continues an
 // earlier one in a new process.
@@ -200,16 +221,21 @@ export class Session {
     this.read().catch((e) => console.error("failed to read claude output:", e));
   }
 
-  static async start(dir: string, home: string, resume?: string): Promise<Session> {
+  static async start(dir: string, home: string, effort: Effort, resume?: string): Promise<Session> {
     await mkdir(home, { recursive: true });
     // Auto mode's classifier approves tool calls; prompts it can't settle come
     // to stdin as can_use_tool requests, which is how AskUserQuestion is answered
     const args = ["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"];
     args.push("--permission-mode", "auto", "--permission-prompt-tool", "stdio");
+    // Tools a chat in Discord has no use for, left out to keep each request small
+    args.push("--disallowedTools", "ReportFindings", "ListAgents", "ScheduleWakeup");
+    args.push("--settings", JSON.stringify(SETTINGS));
+    args.push("--effort", effort);
     if (resume) args.push("--resume", resume);
     const proc = Bun.spawn(args, {
       cwd: dir,
-      env: { ...Bun.env, CLAUDE_CONFIG_DIR: home },
+      // The claude.ai connectors (Claude Docs and the like) ride along on every request otherwise
+      env: { ...Bun.env, CLAUDE_CONFIG_DIR: home, ENABLE_CLAUDEAI_MCP_SERVERS: "false" },
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
