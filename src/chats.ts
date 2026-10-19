@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import type { Message, SendableChannels } from "discord.js";
+import { Message, type ChatInputCommandInteraction, type SendableChannels } from "discord.js";
 import { claudeHome, Session, type Reply } from "./claude";
 import type { Config } from "./config";
 
@@ -12,6 +12,19 @@ const MAX_MESSAGE = 2000;
 // A typing indicator lasts about 10 seconds, so it's renewed before that
 const TYPING_MS = 8_000;
 
+// An interaction can be answered for 15 minutes; later replies go to the channel
+const INTERACTION_MS = 14 * 60_000;
+
+// A slash command run in the channel, with the prompt that runs it in Claude
+export interface Command {
+  readonly interaction: ChatInputCommandInteraction;
+  readonly prompt: string;
+}
+
+type Input = Message | Command;
+
+const idOf = (input: Input) => (input instanceof Message ? input.id : input.interaction.id);
+
 interface Saved {
   readonly dir: string;
   readonly sessionId?: string;
@@ -19,12 +32,16 @@ interface Saved {
   readonly lastMessageId?: string;
 }
 
-const byId = (a: Message, b: Message) => (BigInt(a.id) < BigInt(b.id) ? -1 : BigInt(a.id) > BigInt(b.id) ? 1 : 0);
+const byId = (a: Input, b: Input) => {
+  const [x, y] = [BigInt(idOf(a)), BigInt(idOf(b))];
+  return x < y ? -1 : x > y ? 1 : 0;
+};
 
-// One message goes as is; several get their authors so Claude can tell them apart
-function merge(batch: readonly Message[]): string {
-  if (batch.length === 1) return batch[0]!.content;
-  return batch.map((m) => `${m.author.displayName}: ${m.content}`).join("\n\n");
+// One message or command goes as is; several messages get their authors so
+// Claude can tell them apart
+function merge(batch: readonly Input[]): string {
+  if (batch.length === 1) return batch[0] instanceof Message ? batch[0].content : batch[0]!.prompt;
+  return (batch as Message[]).map((m) => `${m.author.displayName}: ${m.content}`).join("\n\n");
 }
 
 // Splits at the last newline that fits, or hard at the limit
@@ -48,8 +65,20 @@ function typing(channel: SendableChannels): () => void {
   return () => clearInterval(timer);
 }
 
-async function sendReply(to: Message, reply: Reply) {
+async function sendReply(to: Input, reply: Reply) {
   const text = reply.isError ? `Claude failed: ${reply.text}` : reply.text || "(empty reply)";
+  if (!(to instanceof Message)) {
+    const { interaction } = to;
+    if (Date.now() - interaction.createdTimestamp < INTERACTION_MS) {
+      for (const [i, content] of chunks(text).entries()) {
+        await (i === 0 ? interaction.editReply(content) : interaction.followUp(content));
+      }
+      return;
+    }
+    const channel = interaction.channel as SendableChannels;
+    for (const content of chunks(`${interaction.user} ${text}`)) await channel.send(content);
+    return;
+  }
   const channel = to.channel as SendableChannels;
   for (const [i, content] of chunks(text).entries()) {
     const reference = i === 0 ? { reply: { messageReference: to.id, failIfNotExists: false } } : {};
@@ -100,10 +129,10 @@ export class Chats {
 }
 
 // A channel's conversation. Messages that arrive while Claude works go out
-// merged into the next turn.
+// merged into the next turn; commands always get a turn of their own.
 export class Chat {
   private readonly seen = new Set<string>();
-  private pending: Message[] = [];
+  private pending: Input[] = [];
   private session: Session | undefined;
   private draining = false;
   private idle: Timer | undefined;
@@ -116,12 +145,13 @@ export class Chat {
   ) {}
 
   // Skips messages already answered or queued, so catch-up and live messages can overlap
-  add(messages: readonly Message[]) {
+  add(inputs: readonly Input[]) {
     const last = this.chats.get(this.channelId)?.lastMessageId;
-    for (const message of messages) {
-      if (this.seen.has(message.id) || (last && BigInt(message.id) <= BigInt(last))) continue;
-      this.seen.add(message.id);
-      this.pending.push(message);
+    for (const input of inputs) {
+      const id = idOf(input);
+      if (this.seen.has(id) || (last && BigInt(id) <= BigInt(last))) continue;
+      this.seen.add(id);
+      this.pending.push(input);
     }
     this.pending.sort(byId);
     this.drain().catch((e) => console.error(`chat in ${this.dir} failed:`, e));
@@ -134,16 +164,19 @@ export class Chat {
     try {
       await this.chats.ready;
       while (this.pending.length > 0) {
-        const batch = this.pending.splice(0);
+        // Messages up to the next command, or the command alone
+        const command = this.pending.findIndex((input) => !(input instanceof Message));
+        const batch = this.pending.splice(0, command === 0 ? 1 : command === -1 ? this.pending.length : command);
         const last = batch.at(-1)!;
-        const stopTyping = typing(last.channel as SendableChannels);
+        // A deferred command already shows that the bot is thinking
+        const stopTyping = last instanceof Message ? typing(last.channel as SendableChannels) : () => {};
         try {
           const reply = await this.turn(merge(batch));
           await sendReply(last, reply).catch((e) => console.error(`failed to reply in ${this.dir}:`, e));
         } finally {
           stopTyping();
         }
-        this.chats.save(this.channelId, { ...this.chats.get(this.channelId)!, lastMessageId: last.id });
+        this.chats.save(this.channelId, { ...this.chats.get(this.channelId)!, lastMessageId: idOf(last) });
       }
     } finally {
       this.draining = false;

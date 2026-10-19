@@ -94,6 +94,13 @@ export interface Reply {
   readonly isError: boolean;
 }
 
+export interface ClaudeCommand {
+  readonly name: string;
+  readonly description: string;
+  readonly argumentHint: string;
+  readonly builtin?: boolean;
+}
+
 // The subset of stream-json events the bot reads
 interface Event {
   type?: string;
@@ -102,6 +109,54 @@ interface Event {
   result?: string;
   is_error?: boolean;
   errors?: string[];
+  response?: {
+    subtype?: string;
+    request_id?: string;
+    error?: string;
+    response?: { commands?: ClaudeCommand[] };
+  };
+}
+
+// The stream-json events in a process's stdout, skipping lines that aren't JSON
+async function* events(stdout: ReadableStream<Uint8Array>): AsyncGenerator<Event> {
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for await (const chunk of stdout) {
+    buffer += decoder.decode(chunk, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop()!;
+    for (const line of lines) {
+      try {
+        yield JSON.parse(line);
+      } catch {}
+    }
+  }
+}
+
+// The slash commands a session in dir can run. The initialize control request
+// answers without starting a turn, so this costs no tokens.
+export async function listCommands(dir: string, home: string): Promise<ClaudeCommand[]> {
+  await mkdir(home, { recursive: true });
+  const proc = Bun.spawn(["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"], {
+    cwd: dir,
+    env: { ...Bun.env, CLAUDE_CONFIG_DIR: home },
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "ignore",
+  });
+  try {
+    proc.stdin.write(`${JSON.stringify({ type: "control_request", request_id: "commands", request: { subtype: "initialize" } })}\n`);
+    proc.stdin.flush();
+    for await (const event of events(proc.stdout)) {
+      const { response } = event;
+      if (event.type !== "control_response" || response?.request_id !== "commands") continue;
+      if (response.subtype !== "success") throw new Error(`claude refused to list its commands: ${response.error}`);
+      return response.response?.commands ?? [];
+    }
+    throw new Error("claude exited without listing its commands");
+  } finally {
+    proc.kill();
+  }
 }
 
 // One running `claude` process. It reads turns from stdin until it's closed, so
@@ -158,22 +213,7 @@ export class Session {
   }
 
   private async read() {
-    const decoder = new TextDecoder();
-    let buffer = "";
-    for await (const chunk of this.proc.stdout) {
-      buffer += decoder.decode(chunk, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop()!;
-      for (const line of lines) {
-        let event: Event;
-        try {
-          event = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        this.handle(event);
-      }
-    }
+    for await (const event of events(this.proc.stdout)) this.handle(event);
     const code = await this.proc.exited;
     this.dead = true;
     const stderr = (await this.stderr).trim();

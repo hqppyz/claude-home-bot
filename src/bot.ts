@@ -1,7 +1,19 @@
-import { ChannelType, Client, Events, GatewayIntentBits, type Channel, type Guild, type Message } from "discord.js";
+import {
+  ChannelType,
+  Client,
+  Events,
+  GatewayIntentBits,
+  MessageFlags,
+  type Channel,
+  type ChatInputCommandInteraction,
+  type Guild,
+  type Message,
+} from "discord.js";
 import { CategorySync, dirOf } from "./channels";
 import { authenticate } from "./auth";
 import { Chats } from "./chats";
+import { claudeHome, listCommands } from "./claude";
+import { promptOf, toDiscord, type Registered } from "./commands";
 import type { AutoEntry, Config, PathConfig } from "./config";
 import { includeIndex } from "./dirs";
 import { watchDirs } from "./watcher";
@@ -49,12 +61,40 @@ export async function startBot(config: Config): Promise<never> {
     if (dir !== undefined) chats.chat(message.channelId, dir).add([message]);
   });
 
+  // Discord command name to Claude command, filled once they're registered
+  let commands: Registered["names"] = new Map();
+  const runCommand = async (interaction: ChatInputCommandInteraction) => {
+    const command = commands.get(interaction.commandName);
+    const dir = interaction.channel ? dirFor(interaction.channel) : undefined;
+    if (command === undefined || dir === undefined) {
+      const content = command === undefined ? "Unknown command." : "This channel has no directory.";
+      await interaction.reply({ content, flags: MessageFlags.Ephemeral });
+      return;
+    }
+    // Deferring buys 15 minutes to answer instead of 3 seconds
+    await interaction.deferReply();
+    chats.chat(interaction.channelId, dir).add([{ interaction, prompt: promptOf(command, interaction) }]);
+  };
+  client.on(Events.InteractionCreate, (interaction) => {
+    if (!interaction.isChatInputCommand() || interaction.guildId !== serverId) return;
+    runCommand(interaction).catch((e) => console.error(`/${interaction.commandName} failed:`, e));
+  });
+
   await client.login(token);
   const guild = await ready;
   // Runs alongside the channel sync; interactions arrive without a DM intent
   authenticate(client, config)
     .catch((e) => console.error("claude login failed:", e))
     .finally(authDone);
+  // Listing needs a logged in Claude. Commands registered by an earlier run stay until then.
+  authed
+    .then(async () => {
+      const registered = toDiscord(await listCommands(config.dataDir, claudeHome(config)));
+      await guild.commands.set(registered.data);
+      commands = registered.names;
+      console.log(`registered ${registered.data.length} commands`);
+    })
+    .catch((e) => console.error("failed to register commands:", e));
   catchUp(guild, chats, dirFor, accepting).catch((e) => console.error("failed to catch up on missed messages:", e));
   return eventLoop(config, guild);
 }
