@@ -1,6 +1,4 @@
-import { isAbsolute } from "node:path";
-
-const CONFIG_PATH = "data/config.yaml";
+import { isAbsolute, join, resolve } from "node:path";
 
 // auto: one channel per directory matched by include - exclude, under a category.
 // manual: the path itself, linked to an existing channel.
@@ -17,10 +15,14 @@ export type PathConfig =
 export type AutoEntry = Extract<PathConfig, { mode: "auto" }>;
 
 export interface Config {
+  // Absolute; holds config.yaml and the bot's Claude home
+  readonly dataDir: string;
   readonly paths: readonly PathConfig[];
   readonly discord: {
     readonly token: string;
     readonly serverId: string;
+    // Users who can manage the bot; doesn't limit activity in channels
+    readonly adminIds: readonly string[];
   };
 }
 
@@ -76,6 +78,14 @@ function patterns(v: unknown, where: string): readonly string[] {
   return v.map((p, i) => str(p, `${where}[${i}]`));
 }
 
+// Optional; a single ID or a list. From env, a comma-separated list.
+function snowflakes(v: unknown, where: string): readonly string[] {
+  if (v === undefined || v === null) return [];
+  if (where.startsWith("DISCORD_") && typeof v === "string") v = v.split(",").map((id) => id.trim());
+  if (!Array.isArray(v)) return [snowflake(v, where)];
+  return v.map((id, i) => snowflake(id, `${where}[${i}]`));
+}
+
 function parsePath(entry: unknown, where: string): PathConfig {
   if (!isRecord(entry) || Object.keys(entry).length !== 1) {
     fail(where, "expected a single `<path>: { ... }` mapping");
@@ -111,15 +121,17 @@ function deepFreeze<T>(value: T): T {
   return value;
 }
 
-export async function loadConfig(): Promise<Config> {
-  const file = Bun.file(CONFIG_PATH);
+export async function loadConfig(dataDir: string): Promise<Config> {
+  dataDir = resolve(dataDir);
+  const configPath = join(dataDir, "config.yaml");
+  const file = Bun.file(configPath);
   const raw: unknown = (await file.exists()) ? (Bun.YAML.parse(await file.text()) ?? {}) : {};
-  if (!isRecord(raw)) fail(CONFIG_PATH, "expected a mapping at top level");
-  checkKeys(raw, ["paths", "discord"], CONFIG_PATH);
+  if (!isRecord(raw)) fail(configPath, "expected a mapping at top level");
+  checkKeys(raw, ["paths", "discord"], configPath);
 
   const discord = raw.discord ?? {};
   if (!isRecord(discord)) fail("discord", "expected a mapping");
-  checkKeys(discord, ["token", "server-id"], "discord");
+  checkKeys(discord, ["token", "server-id", "admin-id"], "discord");
 
   // PATHS holds the whole list as YAML, e.g. PATHS='[{/home/me: {mode: manual}}]'
   let [paths, pathsWhere] = pick(raw, ["paths"]);
@@ -127,10 +139,12 @@ export async function loadConfig(): Promise<Config> {
   if (!Array.isArray(paths) || paths.length === 0) fail(pathsWhere, "expected a non-empty list");
 
   return deepFreeze({
+    dataDir,
     paths: paths.map((p, i) => parsePath(p, `paths[${i}]`)),
     discord: {
       token: str(...pick(discord, ["discord", "token"])),
       serverId: snowflake(...pick(discord, ["discord", "server-id"])),
+      adminIds: snowflakes(...pick(discord, ["discord", "admin-id"])),
     },
   });
 }

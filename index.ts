@@ -1,3 +1,5 @@
+import { stat } from "node:fs/promises";
+import { parseArgs } from "node:util";
 import { ConfigError, loadConfig, type Config } from "./src/config";
 import { resolveDirs } from "./src/dirs";
 import { startBot } from "./src/bot";
@@ -5,7 +7,17 @@ import { startBot } from "./src/bot";
 let config: Config;
 let dirs: string[][];
 try {
-  config = await loadConfig();
+  let values: { data?: string };
+  try {
+    ({ values } = parseArgs({ args: Bun.argv.slice(2), options: { data: { type: "string" } } }));
+  } catch (e) {
+    throw new ConfigError((e as Error).message);
+  }
+  if (!values.data) throw new ConfigError("--data <dir> is required");
+  if (!(await stat(values.data).catch(() => null))?.isDirectory()) {
+    throw new ConfigError(`--data: ${values.data} is not a directory`);
+  }
+  config = await loadConfig(values.data);
   dirs = await Promise.all(config.paths.map(resolveDirs));
 } catch (e) {
   if (!(e instanceof ConfigError)) throw e;

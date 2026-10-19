@@ -1,5 +1,6 @@
 import { Client, Events, GatewayIntentBits, type Guild, type Message } from "discord.js";
 import { CategorySync } from "./channels";
+import { authenticate } from "./auth";
 import type { AutoEntry, Config, PathConfig } from "./config";
 import { includeIndex } from "./dirs";
 import { watchDirs } from "./watcher";
@@ -33,7 +34,10 @@ export async function startBot(config: Config): Promise<never> {
   });
 
   await client.login(token);
-  return eventLoop(config, await ready);
+  const guild = await ready;
+  // Runs alongside the channel sync; interactions arrive without a DM intent
+  authenticate(client, config).catch((e) => console.error("claude login failed:", e));
+  return eventLoop(config, guild);
 }
 
 async function eventLoop(config: Config, guild: Guild): Promise<never> {
