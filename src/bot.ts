@@ -1,4 +1,5 @@
 import {
+  ApplicationCommandOptionType,
   ChannelType,
   Client,
   Events,
@@ -18,10 +19,26 @@ import { claudeHome, listCommands } from "./claude";
 import { promptOf, toDiscord, type Registered } from "./commands";
 import type { AutoEntry, Config, PathConfig } from "./config";
 import { includeIndex } from "./dirs";
+import { RESTART_CODE } from "./restart";
 import { watchDirs } from "./watcher";
 
 // The bot's own command: empties the channel, then starts the conversation over
 const CLEAN = { name: "clean", description: "Delete every message in this channel, then /clear the conversation" };
+
+// The bot's own command: a new claude process for the channel, or a new bot process
+const RESTART = {
+  name: "restart",
+  description: "Restart this channel's Claude session, or the whole bot",
+  options: [
+    {
+      type: ApplicationCommandOptionType.String as const,
+      name: "what",
+      description: "session or bot",
+      required: true,
+      choices: ["session", "bot"].map((c) => ({ name: c, value: c })),
+    },
+  ],
+};
 
 export async function startBot(config: Config): Promise<never> {
   const { serverId, token } = config.discord;
@@ -91,6 +108,27 @@ export async function startBot(config: Config): Promise<never> {
       chats.chat(interaction.channelId, dir).add([{ interaction, prompt: "/clear" }]);
       return;
     }
+    if (interaction.commandName === RESTART.name && interaction.options.getString("what") === "bot") {
+      if (!config.discord.adminIds.includes(interaction.user.id)) {
+        await interaction.reply({ content: "Only admins can restart the bot.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+      console.log(`restart requested by ${interaction.user.tag}`);
+      await interaction.reply("Restarting the bot…").catch(() => {});
+      chats.stop();
+      await client.destroy();
+      process.exit(RESTART_CODE);
+    }
+    if (interaction.commandName === RESTART.name) {
+      if (dir === undefined) {
+        await interaction.reply({ content: "This channel has no directory.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+      chats.chat(interaction.channelId, dir).stop();
+      console.log(`restarted the session in ${dir}`);
+      await interaction.reply("Session restarted; the next message resumes the conversation.");
+      return;
+    }
     const command = commands.get(interaction.commandName);
     if (command === undefined || dir === undefined) {
       const content = command === undefined ? "Unknown command." : "This channel has no directory.";
@@ -124,7 +162,7 @@ export async function startBot(config: Config): Promise<never> {
   // Listing needs a logged in Claude. Commands registered by an earlier run stay until then.
   authed
     .then(async () => {
-      const registered = toDiscord(await listCommands(config.dataDir, claudeHome(config)), [CLEAN]);
+      const registered = toDiscord(await listCommands(config.dataDir, claudeHome(config)), [CLEAN, RESTART]);
       await guild.commands.set(registered.data);
       commands = registered.names;
       console.log(`registered ${registered.data.length} commands`);

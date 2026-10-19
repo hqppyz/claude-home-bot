@@ -203,6 +203,8 @@ export class Session {
   // Set by the first init event, which a failed resume never sends
   started = false;
   dead = false;
+  // Set by close(), so a process killed on purpose isn't taken for a failed resume
+  closed = false;
   private turn: PromiseWithResolvers<Reply> | undefined;
   private onEvent: (event: RawEvent) => void = () => {};
   private ask: Ask | undefined;
@@ -257,6 +259,7 @@ export class Session {
   }
 
   close() {
+    this.closed = true;
     this.proc.kill();
   }
 
@@ -304,8 +307,11 @@ export class Session {
     for await (const event of events(this.proc.stdout)) this.handle(event);
     const code = await this.proc.exited;
     this.dead = true;
+    // Questions still waiting can't be answered anymore
+    for (const prompt of this.prompts.values()) prompt.abort();
     const stderr = (await this.stderr).trim();
-    this.finish({ text: stderr || `claude exited with code ${code}`, isError: true });
+    if (this.closed) this.finish({ text: "Session closed.", isError: false });
+    else this.finish({ text: stderr || `claude exited with code ${code}`, isError: true });
   }
 
   private handle(event: Event) {

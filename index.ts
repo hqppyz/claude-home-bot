@@ -3,6 +3,23 @@ import { parseArgs } from "node:util";
 import { ConfigError, loadConfig, type Config } from "./src/config";
 import { resolveDirs } from "./src/dirs";
 import { startBot } from "./src/bot";
+import { RESTART_CODE } from "./src/restart";
+
+// The bot runs in a child process, so /restart bot can exit it and get a new
+// one running the latest code
+if (!Bun.env.BOT_WORKER) {
+  let proc: Bun.Subprocess | undefined;
+  for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, () => proc?.kill(signal));
+  for (;;) {
+    proc = Bun.spawn([process.execPath, ...process.argv.slice(1)], {
+      env: { ...Bun.env, BOT_WORKER: "1" },
+      stdio: ["inherit", "inherit", "inherit"],
+    });
+    const code = await proc.exited;
+    if (code !== RESTART_CODE) process.exit(code);
+    console.log("restarting the bot");
+  }
+}
 
 let config: Config;
 let dirs: string[][];

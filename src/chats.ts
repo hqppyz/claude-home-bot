@@ -178,6 +178,11 @@ export class Chats {
     if (!chat) this.chats.set(channelId, (chat = new Chat(this, channelId, dir, claudeHome(this.config), this.config.claude.effort)));
     return chat;
   }
+
+  // Ends every running session, as before the bot exits
+  stop() {
+    for (const chat of this.chats.values()) chat.stop();
+  }
 }
 
 // A channel's conversation. Messages that arrive while Claude works go out
@@ -290,7 +295,7 @@ export class Chat {
     if (session.dead) {
       this.session = undefined;
       // A resume that dies before starting means the conversation is gone
-      if (session.resumed && !session.started) {
+      if (session.resumed && !session.started && !session.closed) {
         console.error(`chat in ${this.dir} could not resume, starting over: ${reply.text}`);
         this.chats.save(this.channelId, { dir: this.dir, lastMessageId: saved?.lastMessageId });
         return this.turn(prompt, onEvent, ask);
@@ -300,7 +305,9 @@ export class Chat {
     return reply;
   }
 
-  private stop() {
+  // Ends the session, cutting off a running turn; the next message resumes the
+  // conversation in a new process
+  stop() {
     this.session?.close();
     this.session = undefined;
   }
