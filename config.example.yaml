@@ -11,6 +11,7 @@ discord:
   token: CHANGEME # not needed when DISCORD_TOKEN is set
   server-id: '1234' # this is a single server bot
   admin-id: '1234' # user id(s) of people that can manage the bot. This doesnt limit activity on the channels
+  admin-only: false # when true, the bot ignores everyone but the admins
 
 claude:
   effort: low # effort each session starts at: low, medium, high, xhigh or max; /effort changes it until the session ends

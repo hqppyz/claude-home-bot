@@ -11,6 +11,7 @@ import {
 } from "discord.js";
 import { pick } from "./ask";
 import { CategorySync, ChannelDirs, legacyDir } from "./channels";
+import { clean } from "./clean";
 import { authenticate } from "./auth";
 import { Chats } from "./chats";
 import { claudeHome, listCommands } from "./claude";
@@ -18,6 +19,9 @@ import { promptOf, toDiscord, type Registered } from "./commands";
 import type { AutoEntry, Config, PathConfig } from "./config";
 import { includeIndex } from "./dirs";
 import { watchDirs } from "./watcher";
+
+// The bot's own command: empties the channel, then starts the conversation over
+const CLEAN = { name: "clean", description: "Delete every message in this channel, then /clear the conversation" };
 
 export async function startBot(config: Config): Promise<never> {
   const { serverId, token } = config.discord;
@@ -27,8 +31,10 @@ export async function startBot(config: Config): Promise<never> {
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
   });
 
-  // Single server bot: only messages from serverId, never from bots (including itself)
-  const accepting = (message: Message) => message.guildId === serverId && !message.author.bot;
+  // Single server bot: only messages from serverId, never from bots (including
+  // itself), and with admin-only, only from the admins
+  const allowed = (userId: string) => !config.discord.adminOnly || config.discord.adminIds.includes(userId);
+  const accepting = (message: Message) => message.guildId === serverId && !message.author.bot && allowed(message.author.id);
 
   const ready = new Promise<Guild>((resolve) => {
     client.once(Events.ClientReady, (c) => {
@@ -70,8 +76,22 @@ export async function startBot(config: Config): Promise<never> {
   // Discord command name to Claude command, filled once they're registered
   let commands: Registered["names"] = new Map();
   const runCommand = async (interaction: ChatInputCommandInteraction) => {
-    const command = commands.get(interaction.commandName);
     const dir = interaction.channel ? dirFor(interaction.channel) : undefined;
+    if (interaction.commandName === CLEAN.name && dir !== undefined && interaction.inGuild() && interaction.channel) {
+      // Only the one who ran it sees the reply, so it isn't left in the cleaned channel
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+      const cleaned = await clean(interaction.channel).catch(async (e) => {
+        console.error(`failed to clean ${dir}:`, e);
+        await interaction.editReply(`Couldn't clean the channel: ${e instanceof Error ? e.message : e}`);
+      });
+      if (!cleaned) return;
+      const { deleted, left } = cleaned;
+      console.log(`cleaned ${deleted} message(s) in ${dir}${left ? `, ${left} left` : ""}`);
+      if (left) await interaction.followUp({ content: `${left} message(s) couldn't be deleted.`, flags: MessageFlags.Ephemeral });
+      chats.chat(interaction.channelId, dir).add([{ interaction, prompt: "/clear" }]);
+      return;
+    }
+    const command = commands.get(interaction.commandName);
     if (command === undefined || dir === undefined) {
       const content = command === undefined ? "Unknown command." : "This channel has no directory.";
       await interaction.reply({ content, flags: MessageFlags.Ephemeral });
@@ -82,8 +102,16 @@ export async function startBot(config: Config): Promise<never> {
     chats.chat(interaction.channelId, dir).add([{ interaction, prompt: promptOf(command, interaction) }]);
   };
   client.on(Events.InteractionCreate, (interaction) => {
-    if (interaction.isStringSelectMenu() && interaction.guildId === serverId) pick(interaction);
-    if (!interaction.isChatInputCommand() || interaction.guildId !== serverId) return;
+    if (interaction.guildId !== serverId) return;
+    if (!allowed(interaction.user.id)) {
+      // An interaction left unanswered shows as failed, so tell them why
+      if (interaction.isRepliable()) {
+        interaction.reply({ content: "Only admins can use this bot.", flags: MessageFlags.Ephemeral }).catch(() => {});
+      }
+      return;
+    }
+    if (interaction.isStringSelectMenu()) pick(interaction);
+    if (!interaction.isChatInputCommand()) return;
     runCommand(interaction).catch((e) => console.error(`/${interaction.commandName} failed:`, e));
   });
 
@@ -96,7 +124,7 @@ export async function startBot(config: Config): Promise<never> {
   // Listing needs a logged in Claude. Commands registered by an earlier run stay until then.
   authed
     .then(async () => {
-      const registered = toDiscord(await listCommands(config.dataDir, claudeHome(config)));
+      const registered = toDiscord(await listCommands(config.dataDir, claudeHome(config)), [CLEAN]);
       await guild.commands.set(registered.data);
       commands = registered.names;
       console.log(`registered ${registered.data.length} commands`);

@@ -49,3 +49,15 @@ test("names and descriptions fit discord's limits", () => {
   expect(data[0]!.description).toHaveLength(100);
   expect(names.get("plugin-some-skill")).toEqual({ name: "Plugin:Some Skill", args: ["args"] });
 });
+
+test("the bot's own commands come first and win over Claude's", () => {
+  const { data, names } = toDiscord(
+    [
+      { name: "clean", description: "Claude's clean", argumentHint: "" },
+      { name: "clear", description: "Clear", argumentHint: "", builtin: true },
+    ],
+    [{ name: "clean", description: "The bot's clean" }],
+  );
+  expect(data.map((c) => c.description)).toEqual(["The bot's clean", "Clear"]);
+  expect([...names.keys()]).toEqual(["clear"]);
+});

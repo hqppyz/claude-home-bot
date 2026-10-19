@@ -83,12 +83,14 @@ function argsOf(command: ClaudeCommand): Arg[] {
   return parseHint(hint) ?? [{ name: ARGS, description: hint, required: hint.startsWith("<") }];
 }
 
-export function toDiscord(commands: readonly ClaudeCommand[]): Registered {
-  const data: ChatInputApplicationCommandData[] = [];
+// The bot's own commands go first and win over Claude commands of the same name
+export function toDiscord(commands: readonly ClaudeCommand[], own: readonly ChatInputApplicationCommandData[] = []): Registered {
+  const data: ChatInputApplicationCommandData[] = [...own];
   const names: Registered["names"] = new Map();
+  const taken = new Set(own.map((c) => c.name));
   for (const command of commands) {
     const name = discordName(command.name);
-    if (!name || names.has(name)) continue;
+    if (!name || names.has(name) || taken.has(name)) continue;
     if (data.length === MAX_COMMANDS) {
       console.error(`discord allows ${MAX_COMMANDS} commands, skipping /${command.name} and later ones`);
       break;

@@ -27,6 +27,8 @@ export interface Config {
     readonly serverId: string;
     // Users who can manage the bot; doesn't limit activity in channels
     readonly adminIds: readonly string[];
+    // Whether the bot ignores everyone but the admins
+    readonly adminOnly: boolean;
   };
   readonly claude: {
     // Each session starts at this effort; /effort changes it until the session ends
@@ -66,6 +68,14 @@ function pick(file: Record<string, unknown>, keys: readonly string[]): [unknown,
 function str(v: unknown, where: string): string {
   if (v === undefined || v === null) fail(where, "required");
   if (typeof v !== "string" || v === "") fail(where, "expected a non-empty string");
+  return v;
+}
+
+// Optional, false by default. From env, "true" or "false".
+function bool(v: unknown, where: string): boolean {
+  if (v === undefined || v === null) return false;
+  if (typeof v === "string" && where.startsWith("DISCORD_")) v = { true: true, false: false }[v.trim().toLowerCase()] ?? v;
+  if (typeof v !== "boolean") fail(where, "expected true or false");
   return v;
 }
 
@@ -145,7 +155,7 @@ export async function loadConfig(dataDir: string): Promise<Config> {
 
   const discord = raw.discord ?? {};
   if (!isRecord(discord)) fail("discord", "expected a mapping");
-  checkKeys(discord, ["token", "server-id", "admin-id"], "discord");
+  checkKeys(discord, ["token", "server-id", "admin-id", "admin-only"], "discord");
 
   const claude = raw.claude ?? {};
   if (!isRecord(claude)) fail("claude", "expected a mapping");
@@ -163,6 +173,7 @@ export async function loadConfig(dataDir: string): Promise<Config> {
       token: str(...pick(discord, ["discord", "token"])),
       serverId: snowflake(...pick(discord, ["discord", "server-id"])),
       adminIds: snowflakes(...pick(discord, ["discord", "admin-id"])),
+      adminOnly: bool(...pick(discord, ["discord", "admin-only"])),
     },
     claude: {
       effort: effort(...pick(claude, ["claude", "effort"])),
