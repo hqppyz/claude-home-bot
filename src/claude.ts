@@ -94,55 +94,104 @@ export interface Reply {
   readonly isError: boolean;
 }
 
-// One Claude conversation per directory, resumed on every message.
-export class ClaudeSession {
-  private sessionId: string | undefined;
-  // Messages to the same session run one at a time, so --resume never forks
-  private queue: Promise<unknown> = Promise.resolve();
+// The subset of stream-json events the bot reads
+interface Event {
+  type?: string;
+  subtype?: string;
+  session_id?: string;
+  result?: string;
+  is_error?: boolean;
+  errors?: string[];
+}
 
-  constructor(
-    readonly dir: string,
-    private readonly home: string,
-  ) {}
+// One running `claude` process. It reads turns from stdin until it's closed, so
+// the conversation stays loaded between messages; --resume continues an
+// earlier one in a new process.
+export class Session {
+  sessionId: string | undefined;
+  // Set by the first init event, which a failed resume never sends
+  started = false;
+  dead = false;
+  private turn: PromiseWithResolvers<Reply> | undefined;
+  private readonly stderr: Promise<string>;
 
-  send(prompt: string): Promise<Reply> {
-    const reply = this.queue.then(() => this.run(prompt));
-    this.queue = reply.catch(() => {});
-    return reply;
+  private constructor(
+    private readonly proc: Bun.Subprocess<"pipe", "pipe", "pipe">,
+    readonly resumed: string | undefined,
+  ) {
+    this.sessionId = resumed;
+    // Drained alongside stdout, so a full stderr pipe can't stall the process
+    this.stderr = new Response(proc.stderr).text();
+    this.read().catch((e) => console.error("failed to read claude output:", e));
   }
 
-  private async run(prompt: string): Promise<Reply> {
-    await mkdir(this.home, { recursive: true });
-    const args = ["claude", "-p", prompt, "--output-format", "json"];
-    if (this.sessionId) args.push("--resume", this.sessionId);
-
+  static async start(dir: string, home: string, resume?: string): Promise<Session> {
+    await mkdir(home, { recursive: true });
+    const args = ["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"];
+    if (resume) args.push("--resume", resume);
     const proc = Bun.spawn(args, {
-      cwd: this.dir,
-      env: { ...Bun.env, CLAUDE_CONFIG_DIR: this.home },
+      cwd: dir,
+      env: { ...Bun.env, CLAUDE_CONFIG_DIR: home },
+      stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
     });
-    const [stdout, stderr, code] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
-    ]);
-
-    let out: { result?: string; session_id?: string; is_error?: boolean };
-    try {
-      out = JSON.parse(stdout);
-    } catch {
-      return { text: stderr.trim() || `claude exited with code ${code}`, isError: true };
-    }
-    if (out.session_id) this.sessionId = out.session_id;
-    return { text: out.result ?? "", isError: out.is_error ?? code !== 0 };
+    return new Session(proc, resume);
   }
-}
 
-const sessions = new Map<string, ClaudeSession>();
+  // One turn at a time; resolves with the turn's result, or an error if the process dies
+  send(prompt: string): Promise<Reply> {
+    if (this.turn) throw new Error("a turn is already running");
+    if (this.dead) return Promise.resolve({ text: "claude is not running", isError: true });
+    this.turn = Promise.withResolvers();
+    try {
+      this.proc.stdin.write(`${JSON.stringify({ type: "user", message: { role: "user", content: prompt } })}\n`);
+      this.proc.stdin.flush();
+    } catch {
+      // The process is exiting; read() ends the turn once it has
+    }
+    return this.turn.promise;
+  }
 
-export function sessionFor(config: Config, dir: string): ClaudeSession {
-  let session = sessions.get(dir);
-  if (!session) sessions.set(dir, (session = new ClaudeSession(dir, claudeHome(config))));
-  return session;
+  close() {
+    this.proc.kill();
+  }
+
+  private async read() {
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for await (const chunk of this.proc.stdout) {
+      buffer += decoder.decode(chunk, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop()!;
+      for (const line of lines) {
+        let event: Event;
+        try {
+          event = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        this.handle(event);
+      }
+    }
+    const code = await this.proc.exited;
+    this.dead = true;
+    const stderr = (await this.stderr).trim();
+    this.finish({ text: stderr || `claude exited with code ${code}`, isError: true });
+  }
+
+  private handle(event: Event) {
+    if (event.type === "system" && event.subtype === "init") {
+      this.started = true;
+      this.sessionId = event.session_id;
+    } else if (event.type === "result") {
+      const text = event.result ?? event.errors?.join("\n") ?? "";
+      this.finish({ text, isError: event.is_error ?? false });
+    }
+  }
+
+  private finish(reply: Reply) {
+    this.turn?.resolve(reply);
+    this.turn = undefined;
+  }
 }

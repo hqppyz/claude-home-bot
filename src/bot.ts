@@ -1,6 +1,7 @@
-import { Client, Events, GatewayIntentBits, type Guild, type Message } from "discord.js";
-import { CategorySync } from "./channels";
+import { ChannelType, Client, Events, GatewayIntentBits, type Channel, type Guild, type Message } from "discord.js";
+import { CategorySync, dirOf } from "./channels";
 import { authenticate } from "./auth";
+import { Chats } from "./chats";
 import type { AutoEntry, Config, PathConfig } from "./config";
 import { includeIndex } from "./dirs";
 import { watchDirs } from "./watcher";
@@ -28,16 +29,61 @@ export async function startBot(config: Config): Promise<never> {
     });
   });
 
-  client.on(Events.MessageCreate, async (message) => {
+  // Manual channels map to their path; auto channels carry theirs in the topic,
+  // trusted only inside a configured category
+  const manual = new Map(config.paths.flatMap((entry) => (entry.mode === "manual" ? [[entry.channelId, entry.path]] : [])));
+  const categories = new Set(config.paths.flatMap((entry) => (entry.mode === "auto" ? [entry.categoryId] : [])));
+  const dirFor = (channel: Channel): string | undefined => {
+    const dir = manual.get(channel.id);
+    if (dir !== undefined) return dir;
+    if (channel.type !== ChannelType.GuildText || !channel.parentId || !categories.has(channel.parentId)) return undefined;
+    return dirOf(channel);
+  };
+
+  const { promise: authed, resolve: authDone } = Promise.withResolvers<void>();
+  const chats = await Chats.load(config, authed);
+
+  client.on(Events.MessageCreate, (message) => {
     if (!accepting(message)) return;
-    await message.reply("Hi");
+    const dir = dirFor(message.channel);
+    if (dir !== undefined) chats.chat(message.channelId, dir).add([message]);
   });
 
   await client.login(token);
   const guild = await ready;
   // Runs alongside the channel sync; interactions arrive without a DM intent
-  authenticate(client, config).catch((e) => console.error("claude login failed:", e));
+  authenticate(client, config)
+    .catch((e) => console.error("claude login failed:", e))
+    .finally(authDone);
+  catchUp(guild, chats, dirFor, accepting).catch((e) => console.error("failed to catch up on missed messages:", e));
   return eventLoop(config, guild);
+}
+
+// Queues the messages sent while the bot was offline, which go out merged into one turn
+async function catchUp(
+  guild: Guild,
+  chats: Chats,
+  dirFor: (channel: Channel) => string | undefined,
+  accepting: (message: Message) => boolean,
+) {
+  for (const channelId of chats.answered()) {
+    const channel = await guild.channels.fetch(channelId).catch(() => null);
+    const dir = channel ? dirFor(channel) : undefined;
+    if (!channel?.isTextBased() || dir === undefined) continue;
+
+    const missed: Message[] = [];
+    let after = chats.get(channelId)!.lastMessageId!;
+    for (;;) {
+      const page = await channel.messages.fetch({ after, limit: 100 });
+      missed.push(...page.values());
+      if (page.size < 100) break;
+      after = page.reduce((max, m) => (BigInt(m.id) > BigInt(max) ? m.id : max), after);
+    }
+    const accepted = missed.filter(accepting);
+    if (accepted.length === 0) continue;
+    console.log(`catching up on ${accepted.length} message(s) in ${dir}`);
+    chats.chat(channelId, dir).add(accepted);
+  }
 }
 
 async function eventLoop(config: Config, guild: Guild): Promise<never> {

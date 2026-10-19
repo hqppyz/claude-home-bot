@@ -8,7 +8,7 @@ const MARKER = "claude-home-bot:";
 
 const markerFor = (dir: string) => `${MARKER} ${dir}`;
 
-function dirOf(channel: TextChannel): string | undefined {
+export function dirOf(channel: TextChannel): string | undefined {
   const line = (channel.topic ?? "").split("\n").find((l) => l.startsWith(MARKER));
   return line?.slice(MARKER.length).trim();
 }
