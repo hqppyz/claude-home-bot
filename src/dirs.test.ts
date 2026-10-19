@@ -2,8 +2,8 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { PathConfig } from "./config";
-import { resolveDirs } from "./dirs";
+import type { AutoEntry, PathConfig } from "./config";
+import { includeIndex, resolveDirs } from "./dirs";
 
 let root: string;
 
@@ -17,13 +17,15 @@ afterAll(() => rm(root, { recursive: true }));
 
 const auto = (include: string[] = [], exclude: string[] = []): PathConfig =>
   ({ path: root, mode: "auto", categoryId: "1", include, exclude });
-const manual = (include: string[] = [], exclude: string[] = []): PathConfig =>
-  ({ path: root, mode: "manual", include, exclude });
+const manual = (path = root): PathConfig => ({ path, mode: "manual", channelId: "1" });
 const rel = (dirs: string[]) => dirs.map((d) => (d === root ? "." : d.slice(root.length + 1)));
 
-test("no include: nothing, in both modes", async () => {
+test("manual: the path itself", async () => {
+  expect(rel(await resolveDirs(manual()))).toEqual(["."]);
+});
+
+test("auto: no include, nothing", async () => {
   expect(await resolveDirs(auto())).toEqual([]);
-  expect(await resolveDirs(manual())).toEqual([]);
 });
 
 test("* is direct child dirs only: no self, files or hidden dirs", async () => {
@@ -31,12 +33,12 @@ test("* is direct child dirs only: no self, files or hidden dirs", async () => {
 });
 
 test(". includes self", async () => {
-  expect(rel(await resolveDirs(manual(["."])))).toEqual(["."]);
+  expect(rel(await resolveDirs(auto(["."])))).toEqual(["."]);
   expect(rel(await resolveDirs(auto([".", "*"])))).toEqual([".", "a", "b", "c"]);
 });
 
 test("globs reach deeper", async () => {
-  expect(rel(await resolveDirs(manual(["a/*"])))).toEqual(["a/x", "a/y"]);
+  expect(rel(await resolveDirs(auto(["a/*"])))).toEqual(["a/x", "a/y"]);
 });
 
 test("exclude . removes self", async () => {
@@ -48,9 +50,18 @@ test("exclude * keeps self", async () => {
 });
 
 test("exclude wins over include", async () => {
-  expect(rel(await resolveDirs(manual(["a/*"], ["a/x"])))).toEqual(["a/y"]);
+  expect(rel(await resolveDirs(auto(["a/*"], ["a/x"])))).toEqual(["a/y"]);
 });
 
 test("missing path throws", async () => {
-  expect(resolveDirs({ ...manual(), path: join(root, "nope") })).rejects.toThrow("not a directory");
+  expect(resolveDirs(manual(join(root, "nope")))).rejects.toThrow("not a directory");
+});
+
+test("includeIndex: first matching pattern, unmatched last", () => {
+  const entry = auto(["b", ".", "a/*", "*"]) as AutoEntry;
+  expect(includeIndex(entry, join(root, "b"))).toBe(0);
+  expect(includeIndex(entry, root)).toBe(1);
+  expect(includeIndex(entry, join(root, "a", "x"))).toBe(2);
+  expect(includeIndex(entry, join(root, "c"))).toBe(3);
+  expect(includeIndex(entry, join(root, "a", "x", "deep"))).toBe(4);
 });

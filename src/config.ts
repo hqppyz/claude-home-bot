@@ -2,15 +2,19 @@ import { isAbsolute } from "node:path";
 
 const CONFIG_PATH = "data/config.yaml";
 
-interface PathBase {
-  readonly path: string;
-  readonly include: readonly string[];
-  readonly exclude: readonly string[];
-}
-
+// auto: one channel per directory matched by include - exclude, under a category.
+// manual: the path itself, linked to an existing channel.
 export type PathConfig =
-  | (PathBase & { readonly mode: "auto"; readonly categoryId: string })
-  | (PathBase & { readonly mode: "manual" });
+  | {
+      readonly path: string;
+      readonly mode: "auto";
+      readonly categoryId: string;
+      readonly include: readonly string[];
+      readonly exclude: readonly string[];
+    }
+  | { readonly path: string; readonly mode: "manual"; readonly channelId: string };
+
+export type AutoEntry = Extract<PathConfig, { mode: "auto" }>;
 
 export interface Config {
   readonly paths: readonly PathConfig[];
@@ -32,7 +36,7 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 
 function checkKeys(obj: Record<string, unknown>, allowed: readonly string[], where: string) {
   for (const key of Object.keys(obj)) {
-    if (!allowed.includes(key)) fail(`${where}.${key}`, "unknown key");
+    if (!allowed.includes(key)) fail(`${where}.${key}`, `unknown key${obj.mode ? ` in ${obj.mode} mode` : ""}`);
   }
 }
 
@@ -80,17 +84,20 @@ function parsePath(entry: unknown, where: string): PathConfig {
   where = `${where} (${path})`;
   if (!isAbsolute(path)) fail(where, "path must be absolute");
   if (!isRecord(opts)) fail(where, "expected a mapping");
-  checkKeys(opts, ["mode", "category_id", "include", "exclude"], where);
-
-  const include = patterns(opts.include, `${where}.include`);
-  const exclude = patterns(opts.exclude, `${where}.exclude`);
 
   switch (opts.mode) {
     case "auto":
-      return { path, mode: "auto", categoryId: snowflake(opts.category_id, `${where}.category_id`), include, exclude };
+      checkKeys(opts, ["mode", "category_id", "include", "exclude"], where);
+      return {
+        path,
+        mode: "auto",
+        categoryId: snowflake(opts.category_id, `${where}.category_id`),
+        include: patterns(opts.include, `${where}.include`),
+        exclude: patterns(opts.exclude, `${where}.exclude`),
+      };
     case "manual":
-      if (opts.category_id !== undefined) fail(`${where}.category_id`, "only valid in auto mode");
-      return { path, mode: "manual", include, exclude };
+      checkKeys(opts, ["mode", "channel_id"], where);
+      return { path, mode: "manual", channelId: snowflake(opts.channel_id, `${where}.channel_id`) };
     default:
       fail(`${where}.mode`, 'expected "auto" or "manual"');
   }

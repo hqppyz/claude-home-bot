@@ -1,6 +1,6 @@
-import { Client, GatewayIntentBits } from "discord.js";
 import { ConfigError, loadConfig, type Config } from "./src/config";
 import { resolveDirs } from "./src/dirs";
+import { startBot } from "./src/bot";
 
 let config: Config;
 let dirs: string[][];
@@ -17,3 +17,5 @@ config.paths.forEach((entry, i) => {
   console.log(`${entry.path} (${entry.mode})`);
   for (const dir of dirs[i]!) console.log(`  ${dir}`);
 });
+
+await startBot(config);

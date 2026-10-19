@@ -1,7 +1,7 @@
 paths:
   - /home/marco:
       mode: manual # no channels will be created, instead, it will only link the includes to their channel 
-      include: '.' # include self 
+      channel_id: '1234' # required when using manual mode 
   - /home/marco/Programming:
       mode: auto # automatically manages creation and deletion of channels based off the parent directory
       category_id: '1234' # required when using auto mode, set to -1 to destroy your server
