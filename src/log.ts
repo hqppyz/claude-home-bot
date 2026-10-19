@@ -7,8 +7,23 @@ const MAX_MESSAGE = 2000;
 // Longest detail on one line of the log
 const MAX_DETAIL = 120;
 
+// Longest command shown in a Bash call's code block
+const MAX_COMMAND = 1500;
+
+// Most of a Bash call's output shown under its command, from the end, in lines and
+// characters; with the longest command it still fits one message
+const MAX_OUTPUT_LINES = 10;
+const MAX_OUTPUT = 400;
+
+// Terminal color and cursor codes, which a code block shows as is
+const ANSI = /\x1b\[[0-9;?]*[A-Za-z]/g;
+
 // A stream-json event as it comes, read only to describe it
 export type RawEvent = Record<string, any>;
+
+// A line of the log; one with an id replaces the earlier one with the same id, as
+// a Bash call's output joins its command
+export type Entry = string | { id: string; text: string };
 
 // Splits at the last newline that fits, or hard at the limit
 export function chunks(text: string): string[] {
@@ -32,6 +47,36 @@ function short(text: unknown): string {
 // A log line, in small text so Claude's own text stands out
 const note = (line: string) => `-# ${escapeMarkdown(line)}`;
 
+// The line between log lines and Claude's text, since Discord's markdown has no divider
+export const RULE = `-# ${"─".repeat(24)}`;
+
+// Whether an entry is a log line, not Claude's text; text that starts like a note counts as one
+const isLog = (entry: Entry) => typeof entry !== "string" || entry.startsWith("-# ");
+
+// A Bash call in a code block, under a note naming it: its command, then the end of
+// its output once it comes; a zero-width space keeps backticks from closing the block
+function bash(command: string, output = ""): string {
+  const cut = command.length > MAX_COMMAND ? `${command.slice(0, MAX_COMMAND - 1)}…` : command;
+  const body = output ? `$ ${cut}\n${output}` : `$ ${cut}`;
+  return `${note("bash")}\n\`\`\`bash\n${body.replace(/```/g, "`\u200b``")}\n\`\`\``;
+}
+
+// The end of a Bash call's output, where errors and summaries go, marked when cut
+function tail(output: string): string {
+  const all = output.replace(ANSI, "").trimEnd();
+  const kept = all.split("\n").slice(-MAX_OUTPUT_LINES).join("\n").slice(-MAX_OUTPUT);
+  return kept.length < all.length ? `…\n${kept}` : kept;
+}
+
+// A tool result's text; parts that aren't text show as their type
+const resultText = (content: RawEvent): string =>
+  Array.isArray(content.content)
+    ? content.content.map((part: RawEvent) => part.text ?? `[${part.type}]`).join(" ")
+    : String(content.content ?? "");
+
+// Whether a tool call is a question the bot asks in its own message
+const isQuestion = (call: RawEvent | undefined) => call?.name === "AskUserQuestion" && Array.isArray(call.input?.questions);
+
 const count = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
 
 // Each kind of token apart, since they're priced apart: cache reads cost a
@@ -47,7 +92,7 @@ function tokens(usage: RawEvent | undefined): string {
 }
 
 // What a content block of an assistant or user message did; Claude's text goes as is
-function block(content: RawEvent, asked: Set<string>): string[] {
+function block(content: RawEvent, calls: Map<string, RawEvent>): Entry[] {
   switch (content.type) {
     case "text":
       return [content.text];
@@ -57,22 +102,21 @@ function block(content: RawEvent, asked: Set<string>): string[] {
       return [];
     case "tool_use": {
       const input = content.input ?? {};
+      calls.set(content.id, content);
       // The bot asks these questions in their own message
-      if (content.name === "AskUserQuestion" && Array.isArray(input.questions)) {
-        asked.add(content.id);
-        return [];
-      }
+      if (isQuestion(content)) return [];
+      if (content.name === "Bash" && typeof input.command === "string") return [{ id: content.id, text: bash(input.command) }];
       // The field a person would recognize the call by, else the whole input
       const detail = input.command ?? input.file_path ?? input.pattern ?? input.url ?? input.query ?? input.prompt ?? JSON.stringify(input);
       return [note(`tool ${content.name} · ${short(detail)}`)];
     }
     case "tool_result": {
+      const call = calls.get(content.tool_use_id);
       // The answers show on the question's own message
-      if (asked.has(content.tool_use_id)) return [];
-      const result = Array.isArray(content.content)
-        ? content.content.map((part: RawEvent) => part.text ?? `[${part.type}]`).join(" ")
-        : content.content;
-      return [note(`${content.is_error ? "tool error" : "tool result"} · ${short(result)}`)];
+      if (isQuestion(call)) return [];
+      const command = call?.name === "Bash" ? call.input?.command : undefined;
+      if (typeof command === "string") return [{ id: call!.id, text: bash(command, tail(resultText(content))) }];
+      return [note(`${content.is_error ? "tool error" : "tool result"} · ${short(resultText(content))}`)];
     }
     default:
       return [note(String(content.type))];
@@ -120,8 +164,8 @@ export function isThinking(event: RawEvent): boolean {
 }
 
 // What one event adds to the turn's messages; message events add one entry per content block.
-// asked collects the ids of the turn's questions, whose results stay hidden too.
-export function describe(event: RawEvent, asked = new Set<string>()): string[] {
+// calls collects the turn's tool calls by id, which their results are shown with.
+export function describe(event: RawEvent, calls = new Map<string, RawEvent>()): Entry[] {
   switch (event.type) {
     case "system":
       // The channel topic shows the session's model and mode instead
@@ -133,7 +177,7 @@ export function describe(event: RawEvent, asked = new Set<string>()): string[] {
     case "user": {
       const content = event.message?.content;
       if (typeof content === "string") return [note(`${event.type} · ${short(content)}`)];
-      if (Array.isArray(content)) return content.flatMap((c: RawEvent) => block(c, asked));
+      if (Array.isArray(content)) return content.flatMap((c: RawEvent) => block(c, calls));
       break;
     }
     case "control_request":
@@ -169,21 +213,25 @@ export interface Outlet {
 // Edits never overlap; events that arrive during one go out together.
 export class LiveReply {
   private readonly entries: string[] = [];
+  // Where each entry with an id is, for its replacement
+  private readonly ids = new Map<string, number>();
   private readonly messages: Message[] = [];
   private readonly sent: string[] = [];
   private flushing: Promise<void> | undefined;
   private dirty = false;
   private hasText = false;
+  // Whether the last entry was a log line, to put a rule where log and text meet
+  private lastLog: boolean | undefined;
 
-  // asked is shared by the turn's replies, since a question's result comes after it splits them
+  // calls is shared by the turn's replies, since a question's result comes after it splits them
   constructor(
     private readonly outlet: Outlet,
-    private readonly asked = new Set<string>(),
+    private readonly calls = new Map<string, RawEvent>(),
   ) {}
 
   add(event: RawEvent) {
     if (event.type === "assistant" && event.message?.content?.some?.((c: RawEvent) => c.type === "text")) this.hasText = true;
-    this.push(...describe(event, this.asked));
+    this.push(...describe(event, this.calls));
   }
 
   // Adds what the events didn't show: an error, or the output of a local
@@ -200,8 +248,22 @@ export class LiveReply {
     while (this.flushing) await this.flushing;
   }
 
-  private push(...entries: string[]) {
-    this.entries.push(...entries);
+  // An entry whose id is in an earlier reply of the turn goes at the end of this one
+  private push(...entries: Entry[]) {
+    for (const entry of entries) {
+      const replaces = typeof entry !== "string" && this.ids.has(entry.id);
+      if (!replaces) {
+        // A blank line under the rule spaces Claude's text from it; a code block keeps its own margin
+        if (this.lastLog !== undefined && this.lastLog !== isLog(entry)) this.entries.push(...(isLog(entry) ? [RULE] : [RULE, ""]));
+        this.lastLog = isLog(entry);
+      }
+      if (typeof entry === "string") this.entries.push(entry);
+      else {
+        const at = this.ids.get(entry.id);
+        if (at === undefined) this.ids.set(entry.id, this.entries.push(entry.text) - 1);
+        else this.entries[at] = entry.text;
+      }
+    }
     this.dirty = true;
     this.flushing ??= this.flush().finally(() => (this.flushing = undefined));
   }

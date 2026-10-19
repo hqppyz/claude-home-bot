@@ -237,14 +237,14 @@ export class Chat {
         // Typing shows that Claude is thinking
         const typing = new Typing(channelOf(last));
         // A question ends the turn's messages so far; what follows goes in new ones below it
-        const asked = new Set<string>();
-        let live = new LiveReply(outlet(last), asked);
+        const calls = new Map<string, RawEvent>();
+        let live = new LiveReply(outlet(last), calls);
         try {
           const ask: Ask = async (questions, signal) => {
             await live.settle();
             const channel = channelOf(last);
             const asking = (this.asking = await Asking.post(channel, questions, signal));
-            live = new LiveReply(channelOutlet(channel), asked);
+            live = new LiveReply(channelOutlet(channel), calls);
             try {
               return await asking.answered;
             } finally {

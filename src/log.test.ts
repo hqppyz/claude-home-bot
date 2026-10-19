@@ -1,23 +1,39 @@
 import { expect, test } from "bun:test";
 import type { Message } from "discord.js";
 import { statusFor } from "./presence";
-import { chunks, cost, describe, effortSet, isThinking, LiveReply, session, usage } from "./log";
+import { chunks, cost, describe, effortSet, isThinking, LiveReply, RULE, session, usage } from "./log";
 
 test("shows Claude's text as is and tool calls as small text", () => {
   const event = {
     type: "assistant",
-    message: { content: [{ type: "text", text: "on\n**it**" }, { type: "tool_use", name: "Bash", input: { command: "echo `hi`" } }] },
+    message: { content: [{ type: "text", text: "on\n**it**" }, { type: "tool_use", name: "Read", input: { file_path: "a_b.ts" } }] },
   };
-  expect(describe(event)).toEqual(["on\n**it**", "-# tool Bash · echo \\`hi\\`"]);
+  expect(describe(event)).toEqual(["on\n**it**", "-# tool Read · a\\_b.ts"]);
+});
+
+test("shows a Bash call's command in a code block", () => {
+  const bash = (command: string) => ({ type: "assistant", message: { content: [{ type: "tool_use", id: "b", name: "Bash", input: { command } }] } });
+  expect(describe(bash("echo `hi`\nls"))).toEqual([{ id: "b", text: "-# bash\n```bash\n$ echo `hi`\nls\n```" }]);
+  expect(describe(bash("echo ```"))).toEqual([{ id: "b", text: "-# bash\n```bash\n$ echo `\u200b``\n```" }]);
+});
+
+test("adds the end of a Bash call's output to its command", () => {
+  const calls = new Map();
+  const result = (content: unknown) => ({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "b", content }] } });
+  describe({ type: "assistant", message: { content: [{ type: "tool_use", id: "b", name: "Bash", input: { command: "ls" } }] } }, calls);
+  expect(describe(result("\x1b[32ma\x1b[0m\nb\n"), calls)).toEqual([{ id: "b", text: "-# bash\n```bash\n$ ls\na\nb\n```" }]);
+  expect(describe(result(""), calls)).toEqual([{ id: "b", text: "-# bash\n```bash\n$ ls\n```" }]);
+  const lines = Array.from({ length: 12 }, (_, i) => String(i)).join("\n");
+  expect(describe(result(lines), calls)).toEqual([{ id: "b", text: `-# bash\n\`\`\`bash\n$ ls\n…\n${[2, 3, 4, 5, 6, 7, 8, 9, 10, 11].join("\n")}\n\`\`\`` }]);
 });
 
 test("hides questions the bot asks in their own message", () => {
   const ask = (input: object) => ({ type: "assistant", message: { content: [{ type: "tool_use", name: "AskUserQuestion", input }] } });
   expect(describe(ask({ questions: [] }))).toEqual([]);
   expect(describe(ask({}))).toEqual(["-# tool AskUserQuestion · {}"]);
-  const asked = new Set<string>();
-  expect(describe({ type: "assistant", message: { content: [{ type: "tool_use", id: "q", name: "AskUserQuestion", input: { questions: [] } }] } }, asked)).toEqual([]);
-  expect(describe({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "q", content: "answered" }] } }, asked)).toEqual([]);
+  const calls = new Map();
+  expect(describe({ type: "assistant", message: { content: [{ type: "tool_use", id: "q", name: "AskUserQuestion", input: { questions: [] } }] } }, calls)).toEqual([]);
+  expect(describe({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "q", content: "answered" }] } }, calls)).toEqual([]);
   expect(describe({ type: "control_request", request: { subtype: "can_use_tool", tool_name: "AskUserQuestion" } })).toEqual([]);
 });
 
@@ -95,6 +111,32 @@ test("edits the last message and sends a new one when it overflows", async () =>
   live.add({ type: "system", subtype: "status" });
   live.add({ type: "assistant", message: { content: [{ type: "text", text: "x".repeat(1990) }] } });
   await live.finish({ text: "x".repeat(1990), isError: false });
-  // The first message is full, so the text starts a second one
-  expect(calls).toEqual(["send 0 16", "send 1 1990"]);
+  // The rule joins the first message, which is then full, so the text starts a second one
+  expect(calls).toEqual(["send 0 16", `edit 0 ${16 + 1 + RULE.length + 1}`, "send 1 1990"]);
+});
+
+test("puts a rule where log lines and Claude's text meet", async () => {
+  const sent: string[] = [];
+  const live = new LiveReply({
+    send: async (content) => (sent.push(content), {} as Message),
+    edit: async (_, content) => sent.push(content),
+  });
+  const text = (text: string) => ({ type: "assistant", message: { content: [{ type: "text", text }] } });
+  const status = { type: "system", subtype: "status" };
+  for (const event of [text("a"), text("b"), status, status, text("c")]) live.add(event);
+  await live.finish({ text: "c", isError: false });
+  expect(sent.at(-1)).toBe(["a", "b", RULE, "-# system/status", "-# system/status", RULE, "", "c"].join("\n"));
+});
+
+test("edits a Bash call's message to add its output", async () => {
+  const sent: string[] = [];
+  const live = new LiveReply({
+    send: async (content) => (sent.push(content), {} as Message),
+    edit: async (_, content) => sent.push(content),
+  });
+  live.add({ type: "assistant", message: { content: [{ type: "tool_use", id: "b", name: "Bash", input: { command: "ls" } }] } });
+  await live.settle();
+  live.add({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "b", content: "a" }] } });
+  await live.finish({ text: "", isError: false });
+  expect(sent).toEqual(["-# bash\n```bash\n$ ls\n```", "-# bash\n```bash\n$ ls\na\n```"]);
 });
