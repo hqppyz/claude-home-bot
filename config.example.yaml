@@ -1,0 +1,12 @@
+paths:
+  - /home/marco:
+      mode: manual # no channels will be created, instead, it will only link the includes to their channel 
+      include: '.' # include self 
+  - /home/marco/Programming:
+      mode: auto # automatically manages creation and deletion of channels based off the parent directory
+      category_id: '1234' # required when using auto mode, set to -1 to destroy your server
+      include: '*' # include all subdirectories
+
+discord:
+  token: CHANGEME # not needed when DISCORD_TOKEN is set
+  server-id: '1234' # this is a single server bot

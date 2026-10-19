@@ -1,0 +1,16 @@
+{
+  "name": "claude-home-bot",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "license": "WTFPL",
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^7"
+  },
+  "dependencies": {
+    "discord.js": "^14.27.0"
+  }
+}
