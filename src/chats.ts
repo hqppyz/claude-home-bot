@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { Message, type ChatInputCommandInteraction, type SendableChannels } from "discord.js";
-import { claudeHome, Session, type Reply } from "./claude";
+import { Asking } from "./ask";
+import { claudeHome, Session, type Ask, type Reply } from "./claude";
 import type { Config } from "./config";
 import { LiveReply, type Outlet, type RawEvent } from "./log";
 
@@ -22,6 +23,8 @@ export interface Command {
 type Input = Message | Command;
 
 const idOf = (input: Input) => (input instanceof Message ? input.id : input.interaction.id);
+
+const channelOf = (input: Input) => (input instanceof Message ? input.channel : input.interaction.channel) as SendableChannels;
 
 interface Saved {
   readonly dir: string;
@@ -66,6 +69,14 @@ function outlet(to: Input): Outlet {
   return {
     send: (content, i) => (i === 0 && fresh() ? interaction.editReply(content) : channel.send(content)),
     edit: (message, content, i) => (i === 0 && fresh() ? interaction.editReply(content) : message.edit(content)),
+  };
+}
+
+// Plain messages in the channel, for a turn's output after a question
+function channelOutlet(channel: SendableChannels): Outlet {
+  return {
+    send: (content) => channel.send(content),
+    edit: (message, content) => message.edit(content),
   };
 }
 
@@ -117,6 +128,9 @@ export class Chat {
   private readonly seen = new Set<string>();
   private pending: Input[] = [];
   private session: Session | undefined;
+  // A question Claude asked; the next message answers it instead of starting a
+  // turn, and a command interrupts the turn so it can run
+  private asking: Asking | undefined;
   private draining = false;
   private idle: Timer | undefined;
 
@@ -134,6 +148,11 @@ export class Chat {
       const id = idOf(input);
       if (this.seen.has(id) || (last && BigInt(id) <= BigInt(last))) continue;
       this.seen.add(id);
+      if (this.asking && input instanceof Message) {
+        this.asking.type(input.content);
+        continue;
+      }
+      if (this.asking) this.session?.interrupt();
       this.pending.push(input);
     }
     this.pending.sort(byId);
@@ -152,10 +171,22 @@ export class Chat {
         const batch = this.pending.splice(0, command === 0 ? 1 : command === -1 ? this.pending.length : command);
         const last = batch.at(-1)!;
         // A deferred command already shows that the bot is thinking
-        const stopTyping = last instanceof Message ? typing(last.channel as SendableChannels) : () => {};
-        const live = new LiveReply(outlet(last));
+        const stopTyping = last instanceof Message ? typing(channelOf(last)) : () => {};
+        // A question ends the turn's messages so far; what follows goes in new ones below it
+        let live = new LiveReply(outlet(last));
         try {
-          const reply = await this.turn(merge(batch), (event) => live.add(event));
+          const ask: Ask = async (questions, signal) => {
+            await live.settle();
+            const channel = channelOf(last);
+            const asking = (this.asking = await Asking.post(channel, questions, signal));
+            live = new LiveReply(channelOutlet(channel));
+            try {
+              return await asking.answered;
+            } finally {
+              this.asking = undefined;
+            }
+          };
+          const reply = await this.turn(merge(batch), (event) => live.add(event), ask);
           await live.finish(reply);
         } finally {
           stopTyping();
@@ -168,19 +199,19 @@ export class Chat {
     this.idle = setTimeout(() => this.stop(), IDLE_MS);
   }
 
-  private async turn(prompt: string, onEvent: (event: RawEvent) => void): Promise<Reply> {
+  private async turn(prompt: string, onEvent: (event: RawEvent) => void, ask: Ask): Promise<Reply> {
     const saved = this.chats.get(this.channelId);
     // Claude keeps conversations per project directory, so a new directory starts over
     this.session ??= await Session.start(this.dir, this.home, saved?.dir === this.dir ? saved.sessionId : undefined);
     const session = this.session;
-    const reply = await session.send(prompt, onEvent);
+    const reply = await session.send(prompt, onEvent, ask);
     if (session.dead) {
       this.session = undefined;
       // A resume that dies before starting means the conversation is gone
       if (session.resumed && !session.started) {
         console.error(`chat in ${this.dir} could not resume, starting over: ${reply.text}`);
         this.chats.save(this.channelId, { dir: this.dir, lastMessageId: saved?.lastMessageId });
-        return this.turn(prompt, onEvent);
+        return this.turn(prompt, onEvent, ask);
       }
     }
     this.chats.save(this.channelId, { ...saved, dir: this.dir, sessionId: session.sessionId });

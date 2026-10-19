@@ -133,6 +133,11 @@ export class LiveReply {
     await this.flushing;
   }
 
+  // Resolves once every message is up to date, for when later output goes elsewhere
+  async settle() {
+    while (this.flushing) await this.flushing;
+  }
+
   private push(...entries: string[]) {
     this.entries.push(...entries);
     this.dirty = true;

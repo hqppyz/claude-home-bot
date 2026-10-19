@@ -102,11 +102,25 @@ export interface ClaudeCommand {
   readonly builtin?: boolean;
 }
 
+// A question of AskUserQuestion's input
+export interface Question {
+  readonly question: string;
+  readonly header: string;
+  readonly options: readonly { label: string; description?: string }[];
+  readonly multiSelect: boolean;
+}
+
+// Asks the person the questions; resolves to each question's answer, keyed by
+// its text. The signal aborts when Claude stops waiting for the answers.
+export type Ask = (questions: readonly Question[], signal: AbortSignal) => Promise<Record<string, string>>;
+
 // The subset of stream-json events the bot reads
 interface Event {
   type?: string;
   subtype?: string;
   session_id?: string;
+  request_id?: string;
+  request?: { subtype?: string; tool_name?: string; input?: { questions?: Question[] } };
   result?: string;
   is_error?: boolean;
   errors?: string[];
@@ -170,6 +184,10 @@ export class Session {
   dead = false;
   private turn: PromiseWithResolvers<Reply> | undefined;
   private onEvent: (event: RawEvent) => void = () => {};
+  private ask: Ask | undefined;
+  // Permission prompts waiting for an answer, by request id
+  private readonly prompts = new Map<string, AbortController>();
+  private interrupted = false;
   private readonly stderr: Promise<string>;
 
   private constructor(
@@ -184,7 +202,10 @@ export class Session {
 
   static async start(dir: string, home: string, resume?: string): Promise<Session> {
     await mkdir(home, { recursive: true });
+    // Auto mode's classifier approves tool calls; prompts it can't settle come
+    // to stdin as can_use_tool requests, which is how AskUserQuestion is answered
     const args = ["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"];
+    args.push("--permission-mode", "auto", "--permission-prompt-tool", "stdio");
     if (resume) args.push("--resume", resume);
     const proc = Bun.spawn(args, {
       cwd: dir,
@@ -197,23 +218,60 @@ export class Session {
   }
 
   // One turn at a time; resolves with the turn's result, or an error if the
-  // process dies. onEvent sees every event of the turn, the result included.
-  send(prompt: string, onEvent: (event: RawEvent) => void = () => {}): Promise<Reply> {
+  // process dies. onEvent sees every event of the turn, the result included;
+  // ask answers the turn's AskUserQuestion calls.
+  send(prompt: string, onEvent: (event: RawEvent) => void = () => {}, ask?: Ask): Promise<Reply> {
     if (this.turn) throw new Error("a turn is already running");
     if (this.dead) return Promise.resolve({ text: "claude is not running", isError: true });
     this.turn = Promise.withResolvers();
     this.onEvent = onEvent;
-    try {
-      this.proc.stdin.write(`${JSON.stringify({ type: "user", message: { role: "user", content: prompt } })}\n`);
-      this.proc.stdin.flush();
-    } catch {
-      // The process is exiting; read() ends the turn once it has
-    }
+    this.ask = ask;
+    this.write({ type: "user", message: { role: "user", content: prompt } });
     return this.turn.promise;
   }
 
   close() {
     this.proc.kill();
+  }
+
+  // Ends the running turn, as Esc does in the terminal. Claude cancels any
+  // permission prompt the turn is waiting on.
+  interrupt() {
+    if (!this.turn || this.interrupted) return;
+    this.interrupted = true;
+    this.write({ type: "control_request", request_id: crypto.randomUUID(), request: { subtype: "interrupt" } });
+  }
+
+  private write(message: object) {
+    try {
+      this.proc.stdin.write(`${JSON.stringify(message)}\n`);
+      this.proc.stdin.flush();
+    } catch {
+      // The process is exiting; read() ends the turn once it has
+    }
+  }
+
+  // Answers a permission prompt. Only AskUserQuestion is answered; anything
+  // else auto mode didn't approve is denied, as nobody is there to review it.
+  private async permit(request_id: string, request: NonNullable<Event["request"]>) {
+    let response: object;
+    const questions = request.input?.questions;
+    if (request.tool_name === "AskUserQuestion" && questions && this.ask) {
+      const controller = new AbortController();
+      this.prompts.set(request_id, controller);
+      try {
+        response = { behavior: "allow", updatedInput: { ...request.input, answers: await this.ask(questions, controller.signal) } };
+      } catch (e) {
+        response = { behavior: "deny", message: `the question could not be asked: ${e}` };
+      } finally {
+        this.prompts.delete(request_id);
+      }
+      // A cancelled prompt takes no answer
+      if (controller.signal.aborted) return;
+    } else {
+      response = { behavior: "deny", message: "nobody is available to approve this" };
+    }
+    this.write({ type: "control_response", response: { subtype: "success", request_id, response } });
   }
 
   private async read() {
@@ -226,17 +284,23 @@ export class Session {
 
   private handle(event: Event) {
     if (this.turn) this.onEvent(event);
-    if (event.type === "system" && event.subtype === "init") {
+    if (event.type === "control_request" && event.request?.subtype === "can_use_tool") {
+      this.permit(event.request_id!, event.request).catch((e) => console.error("failed to answer a permission prompt:", e));
+    } else if (event.type === "control_cancel_request") {
+      this.prompts.get(event.request_id!)?.abort();
+    } else if (event.type === "system" && event.subtype === "init") {
       this.started = true;
       this.sessionId = event.session_id;
     } else if (event.type === "result") {
       const text = event.result ?? event.errors?.join("\n") ?? "";
-      this.finish({ text, isError: event.is_error ?? false });
+      // An interrupted turn ends in an error that only carries diagnostics
+      this.finish(this.interrupted ? { text: "Interrupted.", isError: false } : { text, isError: event.is_error ?? false });
     }
   }
 
   private finish(reply: Reply) {
     this.turn?.resolve(reply);
     this.turn = undefined;
+    this.interrupted = false;
   }
 }
