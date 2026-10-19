@@ -1,17 +1,29 @@
 paths:
-  - /home/marco:
-      mode: manual # no channels will be created, instead, it will only link the includes to their channel 
-      channel_id: '1234' # required when using manual mode 
-  - /home/marco/Programming:
+  - /home/me:
+      mode: manual # no channels will be created, instead, it will only link the includes to their channel
+      channel_id: '1234' # required when using manual mode
+  - /home/me/Projects:
       mode: auto # automatically manages creation and deletion of channels based off the parent directory
-      category_id: '1234' # required when using auto mode, set to -1 to destroy your server
-      include: '*' # include all subdirectories
+      category_id: '1234' # optional, channels go under this category
+      include: # a glob or a list of globs; channels follow this order, "." is the path itself
+        - claude-home-bot
+        - 'whatever'
+  - /home/me/Documents:
+      mode: auto # no category_id, so the channels go at the top of the server
+      permissions: plan # optional, replaces claude.permissions for these sessions
+      include:
+        - '.' # Documents itself
+        - '*' # every subdirectory
+      exclude: # optional, globs to leave out of include
+        - Photos
+        - Pictures
 
 discord:
   token: CHANGEME # not needed when DISCORD_TOKEN is set
   server-id: '1234' # this is a single server bot
-  admin-id: '1234' # user id(s) of people that can manage the bot. This doesnt limit activity on the channels
+  admin-id: '1234' # a user id, a list of user ids, of people that can manage the bot
   admin-only: false # when true, the bot ignores everyone but the admins
 
 claude:
+  permissions: manual # manual, acceptEdits, auto, bypassPermissions, dontAsk or plan
   effort: low # effort each session starts at: low, medium, high, xhigh or max; /effort changes it until the session ends

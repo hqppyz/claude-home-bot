@@ -3,7 +3,7 @@ import { Message, type ChatInputCommandInteraction, type SendableChannels } from
 import { Asking } from "./ask";
 import { showUsage } from "./presence";
 import { claudeHome, Session, type Ask, type Reply } from "./claude";
-import type { Config, Effort } from "./config";
+import { permissionsFor, type Config, type Effort, type PermissionMode } from "./config";
 import { withStatus, type Status } from "./channels";
 import { cost, effortSet, isThinking, LiveReply, session, type Outlet, type RawEvent } from "./log";
 
@@ -175,7 +175,7 @@ export class Chats {
 
   chat(channelId: string, dir: string): Chat {
     let chat = this.chats.get(channelId);
-    if (!chat) this.chats.set(channelId, (chat = new Chat(this, channelId, dir, claudeHome(this.config), this.config.claude.effort)));
+    if (!chat) this.chats.set(channelId, (chat = new Chat(this, channelId, dir, claudeHome(this.config), this.config.claude.effort, permissionsFor(this.config, dir))));
     return chat;
   }
 
@@ -206,6 +206,7 @@ export class Chat {
     readonly dir: string,
     private readonly home: string,
     private readonly startEffort: Effort,
+    private readonly mode: PermissionMode,
   ) {
     this.effort = startEffort;
   }
@@ -287,7 +288,7 @@ export class Chat {
     const saved = this.chats.get(this.channelId);
     // Claude keeps conversations per project directory, so a new directory starts over
     if (!this.session) {
-      this.session = await Session.start(this.dir, this.home, this.startEffort, saved?.dir === this.dir ? saved.sessionId : undefined);
+      this.session = await Session.start(this.dir, this.home, this.startEffort, this.mode, saved?.dir === this.dir ? saved.sessionId : undefined);
       this.effort = this.startEffort;
     }
     const session = this.session;

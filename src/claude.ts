@@ -1,6 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import type { Config, Effort } from "./config";
+import type { Config, Effort, PermissionMode } from "./config";
 import type { RawEvent } from "./log";
 
 // Claude Code keeps settings, credentials and transcripts under CLAUDE_CONFIG_DIR,
@@ -223,12 +223,12 @@ export class Session {
     this.read().catch((e) => console.error("failed to read claude output:", e));
   }
 
-  static async start(dir: string, home: string, effort: Effort, resume?: string): Promise<Session> {
+  static async start(dir: string, home: string, effort: Effort, mode: PermissionMode, resume?: string): Promise<Session> {
     await mkdir(home, { recursive: true });
-    // Auto mode's classifier approves tool calls; prompts it can't settle come
-    // to stdin as can_use_tool requests, which is how AskUserQuestion is answered
+    // Tool calls the mode doesn't approve come to stdin as can_use_tool
+    // requests, which is how AskUserQuestion is answered
     const args = ["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"];
-    args.push("--permission-mode", "auto", "--permission-prompt-tool", "stdio");
+    args.push("--permission-mode", mode, "--permission-prompt-tool", "stdio");
     // Tools a chat in Discord has no use for, left out to keep each request small
     args.push("--disallowedTools", "ReportFindings", "ListAgents", "ScheduleWakeup");
     args.push("--settings", JSON.stringify(SETTINGS));
@@ -281,7 +281,7 @@ export class Session {
   }
 
   // Answers a permission prompt. Only AskUserQuestion is answered; anything
-  // else auto mode didn't approve is denied, as nobody is there to review it.
+  // else the mode didn't approve is denied, as nobody is there to review it.
   private async permit(request_id: string, request: NonNullable<Event["request"]>) {
     let response: object;
     const questions = request.input?.questions;

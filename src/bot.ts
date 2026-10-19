@@ -66,14 +66,14 @@ export async function startBot(config: Config): Promise<never> {
   });
 
   // Manual channels map to their path; auto channels to the directory they were
-  // made for, trusted only inside a configured category
+  // made for, trusted only inside a configured category (null: no category)
   const channelDirs = await ChannelDirs.load(config.dataDir);
   const manual = new Map(config.paths.flatMap((entry) => (entry.mode === "manual" ? [[entry.channelId, entry.path]] : [])));
-  const categories = new Set(config.paths.flatMap((entry) => (entry.mode === "auto" ? [entry.categoryId] : [])));
+  const categories = new Set(config.paths.flatMap((entry) => (entry.mode === "auto" ? [entry.categoryId ?? null] : [])));
   const dirFor = (channel: Channel): string | undefined => {
     const dir = manual.get(channel.id);
     if (dir !== undefined) return dir;
-    if (channel.type !== ChannelType.GuildText || !channel.parentId || !categories.has(channel.parentId)) return undefined;
+    if (channel.type !== ChannelType.GuildText || !categories.has(channel.parentId)) return undefined;
     // A legacy marker still counts until the first sync moves it into the store
     return channelDirs.get(channel.id) ?? legacyDir(channel.topic).dir;
   };
@@ -94,25 +94,27 @@ export async function startBot(config: Config): Promise<never> {
   let commands: Registered["names"] = new Map();
   const runCommand = async (interaction: ChatInputCommandInteraction) => {
     const dir = interaction.channel ? dirFor(interaction.channel) : undefined;
+    // The bot's own commands wipe or restart things, so they're for admins even without admin-only
+    const own = [CLEAN.name, RESTART.name].includes(interaction.commandName);
+    if (own && !config.discord.adminIds.includes(interaction.user.id)) {
+      await interaction.reply({ content: `Only admins can use /${interaction.commandName}.`, flags: MessageFlags.Ephemeral });
+      return;
+    }
     if (interaction.commandName === CLEAN.name && dir !== undefined && interaction.inGuild() && interaction.channel) {
-      // Only the one who ran it sees the reply, so it isn't left in the cleaned channel
-      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-      const cleaned = await clean(interaction.channel).catch(async (e) => {
+      // The reply stays, as /clear's answer goes into it
+      const reply = await interaction.deferReply({ withResponse: true });
+      const cleaned = await clean(interaction.channel, reply.resource?.message?.id).catch(async (e) => {
         console.error(`failed to clean ${dir}:`, e);
         await interaction.editReply(`Couldn't clean the channel: ${e instanceof Error ? e.message : e}`);
       });
       if (!cleaned) return;
       const { deleted, left } = cleaned;
       console.log(`cleaned ${deleted} message(s) in ${dir}${left ? `, ${left} left` : ""}`);
-      if (left) await interaction.followUp({ content: `${left} message(s) couldn't be deleted.`, flags: MessageFlags.Ephemeral });
+      if (left) await interaction.followUp(`${left} message(s) couldn't be deleted.`);
       chats.chat(interaction.channelId, dir).add([{ interaction, prompt: "/clear" }]);
       return;
     }
     if (interaction.commandName === RESTART.name && interaction.options.getString("what") === "bot") {
-      if (!config.discord.adminIds.includes(interaction.user.id)) {
-        await interaction.reply({ content: "Only admins can restart the bot.", flags: MessageFlags.Ephemeral });
-        return;
-      }
       console.log(`restart requested by ${interaction.user.tag}`);
       await interaction.reply("Restarting the bot…").catch(() => {});
       chats.stop();
@@ -202,9 +204,10 @@ async function catchUp(
 async function eventLoop(config: Config, guild: Guild, channelDirs: ChannelDirs): Promise<never> {
   const autoEntries = config.paths.filter((entry): entry is AutoEntry => entry.mode === "auto");
 
-  // One sync per category; several auto entries may share a category
-  const syncs = new Map<string, CategorySync>();
-  for (const { categoryId } of autoEntries) {
+  // One sync per category; several auto entries may share a category. Entries
+  // without one share the null key, the top of the server.
+  const syncs = new Map<string | null, CategorySync>();
+  for (const { categoryId = null } of autoEntries) {
     if (!syncs.has(categoryId)) syncs.set(categoryId, await CategorySync.open(guild, categoryId, channelDirs));
   }
 
@@ -212,10 +215,10 @@ async function eventLoop(config: Config, guild: Guild, channelDirs: ChannelDirs)
 
   // Wanted dirs in channel order: config entry order, then the first include
   // pattern matching each dir, then alphabetical
-  const reconcile = async (categoryId: string) => {
+  const reconcile = async (categoryId: string | null) => {
     const wanted: string[] = [];
     for (const entry of autoEntries) {
-      if (entry.categoryId !== categoryId) continue;
+      if ((entry.categoryId ?? null) !== categoryId) continue;
       const rank = (dir: string) => includeIndex(entry, dir);
       const dirs = [...matched.get(entry)!].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
       for (const dir of dirs) if (!wanted.includes(dir)) wanted.push(dir);
@@ -242,7 +245,7 @@ async function eventLoop(config: Config, guild: Guild, channelDirs: ChannelDirs)
     if (type === "added") matched.get(entry)!.add(dir);
     else matched.get(entry)!.delete(dir);
 
-    if (synced && entry.mode === "auto") await reconcile(entry.categoryId);
+    if (synced && entry.mode === "auto") await reconcile(entry.categoryId ?? null);
   }
   throw new Error("directory watcher stopped");
 }

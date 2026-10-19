@@ -83,15 +83,17 @@ function channelName(dir: string): string {
   return (name || "root").slice(0, 100);
 }
 
-// Keeps the managed text channels of one category in line with a set of directories.
+// Keeps the managed text channels of one category, or of the top of the server
+// when null, in line with a set of directories.
 export class CategorySync {
   private constructor(
     private readonly guild: Guild,
-    private readonly category: CategoryChannel,
+    private readonly category: CategoryChannel | null,
     private readonly dirs: ChannelDirs,
   ) {}
 
-  static async open(guild: Guild, categoryId: string, dirs: ChannelDirs): Promise<CategorySync> {
+  static async open(guild: Guild, categoryId: string | null, dirs: ChannelDirs): Promise<CategorySync> {
+    if (categoryId === null) return new CategorySync(guild, null, dirs);
     const category = await guild.channels.fetch(categoryId).catch(() => null);
     if (category?.type !== ChannelType.GuildCategory) {
       throw new Error(`category ${categoryId} not found in server ${guild.name}`);
@@ -100,12 +102,13 @@ export class CategorySync {
   }
 
   get name(): string {
-    return this.category.name;
+    return this.category?.name ?? "(no category)";
   }
 
   private textChannels(): TextChannel[] {
+    const parentId = this.category?.id ?? null;
     return [...this.guild.channels.cache.values()]
-      .filter((c): c is TextChannel => c.parentId === this.category.id && c.type === ChannelType.GuildText)
+      .filter((c): c is TextChannel => c.parentId === parentId && c.type === ChannelType.GuildText)
       .sort((a, b) => a.position - b.position);
   }
 
@@ -145,7 +148,7 @@ export class CategorySync {
       const channel = await this.guild.channels.create({
         name,
         type: ChannelType.GuildText,
-        parent: this.category.id,
+        parent: this.category?.id,
         reason: `directory found: ${dir}`,
       });
       this.dirs.set(channel.id, dir);
@@ -180,6 +183,6 @@ export class CategorySync {
     if (target.every((channel, i) => channel === current[i])) return;
 
     await this.guild.channels.setPositions(target.map((channel, position) => ({ channel, position })));
-    console.log(`ordered ${this.category.name}: ${target.map((c) => `#${c.name}`).join(" ")}`);
+    console.log(`ordered ${this.name}: ${target.map((c) => `#${c.name}`).join(" ")}`);
   }
 }
