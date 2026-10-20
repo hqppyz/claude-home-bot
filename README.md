@@ -6,13 +6,13 @@ Discord bot that gives each of your directories a channel with its own [Claude C
 
 Claude can only do what its [permission mode](https://code.claude.com/docs/en/permissions) allows; everything else is denied. Sessions start in `manual`, where Claude mostly reads. Pick a looser mode globally or per path in the config.
 
-> **⚠️ SESSIONS RUN ON YOUR MACHINE ⚠️**<br>With a permissive mode (`auto`, `acceptEdits`, `bypassPermissions`), **anyone who can write in a bot channel can change your files**.<br>Keep the server private or set `admin-only: true`.
+> **⚠️ SESSIONS RUN ON YOUR MACHINE ⚠️**<br>With a permissive mode (`auto`, `acceptEdits`, `bypassPermissions`), **anyone who can write in a bot channel can change your files**.<br>Keep `admin-only: true` unless only people you trust can write in the server.
 
 ## Setup
 
 Needs [bun](https://bun.com) and the `claude` CLI on `PATH`.
 
-1. Create a bot in the [Developer Portal](https://discord.com/developers/applications).<br>Turn on **Message Content Intent**. <br>Invite it with the `bot` and `applications.commands` scopes and the Manage Channels, Manage Messages and Manage Roles permissions.
+1. Create a bot in the [Developer Portal](https://discord.com/developers/applications).<br>Turn on **Message Content Intent**. <br>Invite it with the `bot` and `applications.commands` scopes and the View Channels, Send Messages, Read Message History, Manage Channels, Manage Messages and Manage Roles permissions.<br>Keep the bot's role above its `<name>-usage` role, or it can't give that role to itself.
 2. Configure and run:
 
    ```bash
@@ -27,10 +27,11 @@ Every config key can also come from the environment: `DISCORD_TOKEN`, `DISCORD_S
 
 ## Commands
 
-Claude's slash commands work as Discord commands. The bot adds two, for admins only:
+Claude's slash commands work as Discord commands. The bot adds three, for admins only:
 
 - `/clean`: delete every message in the channel and clear the conversation
 - `/restart session|bot`: restart the channel's Claude process, or the whole bot
+- `/stop`: stop the whole bot, after a confirmation button
 
 ## Trimmed sessions
 

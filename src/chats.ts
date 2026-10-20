@@ -119,6 +119,7 @@ function outlet(to: Input): Outlet {
     return {
       send: (content, i) => channel.send({ content, ...(i === 0 ? { reply: { messageReference: to.id, failIfNotExists: false } } : {}) }),
       edit: (message, content) => message.edit(content),
+      report: (content) => channel.send(content),
     };
   }
   const { interaction } = to;
@@ -127,6 +128,7 @@ function outlet(to: Input): Outlet {
   return {
     send: (content, i) => (i === 0 && fresh() ? interaction.editReply(content) : channel.send(content)),
     edit: (message, content, i) => (i === 0 && fresh() ? interaction.editReply(content) : message.edit(content)),
+    report: (content) => channel.send(content),
   };
 }
 
@@ -135,6 +137,7 @@ function channelOutlet(channel: SendableChannels): Outlet {
   return {
     send: (content) => channel.send(content),
     edit: (message, content) => message.edit(content),
+    report: (content) => channel.send(content),
   };
 }
 

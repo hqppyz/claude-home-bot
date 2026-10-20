@@ -32,12 +32,18 @@ export function showUsage(guild: Guild, event: RawEvent) {
 }
 
 // The bot's "<name>-usage" role, made and given to the bot if it's missing.
-// A new role goes below the bot's own, so the bot can edit it; the bot's own
-// role must have no color for this one to show.
+// It sits right below the bot's own role, the highest a bot can place a role,
+// so its color beats other roles'; the bot's own role must have no color for
+// this one to show.
 async function usageRole(guild: Guild): Promise<Role> {
   const me = await guild.members.fetchMe();
   const name = `${me.user.username}-usage`;
-  const role = guild.roles.cache.find((r) => r.name === name) ?? (await guild.roles.create({ name, reason: "Shows Claude usage" }));
+  const top = me.roles.highest;
+  let role = guild.roles.cache.find((r) => r.name === name);
+  if (!role) role = await guild.roles.create({ name, position: top.position, reason: "Shows Claude usage" });
+  // A re-invited bot gets a new role at the bottom, under an old usage role
+  else if (role.comparePositionTo(top) >= 0) throw new Error(`move the bot's role ${top.name} above ${name}`);
+  else if (role.position < top.position - 1) role = await role.setPosition(top.position - 1, { reason: "Shows Claude usage" });
   if (!me.roles.cache.has(role.id)) await me.roles.add(role);
   return role;
 }

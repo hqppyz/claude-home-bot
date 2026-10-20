@@ -206,6 +206,8 @@ export interface Outlet {
   // index is the message's place in the turn; the first one answers the input
   send(content: string, index: number): Promise<Message>;
   edit(message: Message, content: string, index: number): Promise<unknown>;
+  // A plain message in the channel, for when sending or editing fails
+  report(content: string): Promise<unknown>;
 }
 
 // A turn's events and reply as they happen: the first event sends a message,
@@ -222,6 +224,8 @@ export class LiveReply {
   private hasText = false;
   // Whether the last entry was a log line, to put a rule where log and text meet
   private lastLog: boolean | undefined;
+  // Whether a failure has been reported in the channel, which happens once per reply
+  private reported = false;
 
   // calls is shared by the turn's replies, since a question's result comes after it splits them
   constructor(
@@ -279,9 +283,19 @@ export class LiveReply {
           this.sent[i] = content;
         } catch (e) {
           console.error("failed to update the turn's messages:", e);
+          this.report(e);
           break;
         }
       }
     }
+  }
+
+  // A reply needs more than a plain message (Read Message History, for one), so
+  // a plain message can still tell why the reply is missing
+  private report(e: unknown) {
+    if (this.reported) return;
+    this.reported = true;
+    const reason = e instanceof Error ? e.message : String(e);
+    this.outlet.report(`Failed to send Claude's reply: ${reason}`).catch((e) => console.error("failed to report the failure:", e));
   }
 }

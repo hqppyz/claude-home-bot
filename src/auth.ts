@@ -78,11 +78,9 @@ export async function authenticate(client: Client, config: Config): Promise<void
   const handle = async (interaction: Interaction) => {
     if (!interaction.isButton() && !interaction.isModalSubmit()) return;
     if (interaction.customId !== CODE_BUTTON && interaction.customId !== CODE_MODAL) return;
-    // Buttons from a previous run point at a login process that no longer exists
-    if (!messages.some((m) => m.id === interaction.message?.id)) {
-      await interaction.reply({ content: "This login link expired.", flags: MessageFlags.Ephemeral });
-      return;
-    }
+    // Another instance of the bot may have sent this one, so leave it to that
+    // instance. A button from a previous run goes unanswered too.
+    if (!messages.some((m) => m.id === interaction.message?.id)) return;
     if (!adminIds.includes(interaction.user.id)) {
       await interaction.reply({ content: "Only admins can log Claude in.", flags: MessageFlags.Ephemeral });
       return;

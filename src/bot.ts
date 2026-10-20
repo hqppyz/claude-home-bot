@@ -1,10 +1,14 @@
 import {
+  ActionRowBuilder,
   ApplicationCommandOptionType,
+  ButtonBuilder,
+  ButtonStyle,
   ChannelType,
   Client,
   Events,
   GatewayIntentBits,
   MessageFlags,
+  type ButtonInteraction,
   type Channel,
   type ChatInputCommandInteraction,
   type Guild,
@@ -39,6 +43,10 @@ const RESTART = {
     },
   ],
 };
+
+// The bot's own command: exits the bot for good, once its button confirms it
+const STOP = { name: "stop", description: "Stop the whole bot" };
+const STOP_BUTTON = "stop:confirm";
 
 export async function startBot(config: Config): Promise<never> {
   const { serverId, token } = config.discord;
@@ -92,15 +100,22 @@ export async function startBot(config: Config): Promise<never> {
 
   // Discord command name to Claude command, filled once they're registered
   let commands: Registered["names"] = new Map();
-  const runCommand = async (interaction: ChatInputCommandInteraction) => {
-    const dir = interaction.channel ? dirFor(interaction.channel) : undefined;
-    // The bot's own commands wipe or restart things, so they're for admins even without admin-only
-    const own = [CLEAN.name, RESTART.name].includes(interaction.commandName);
+  const runCommand = async (interaction: ChatInputCommandInteraction, dir: string) => {
+    // The bot's own commands wipe, restart or stop things, so they're for admins even without admin-only
+    const own = [CLEAN.name, RESTART.name, STOP.name].includes(interaction.commandName);
     if (own && !config.discord.adminIds.includes(interaction.user.id)) {
       await interaction.reply({ content: `Only admins can use /${interaction.commandName}.`, flags: MessageFlags.Ephemeral });
       return;
     }
-    if (interaction.commandName === CLEAN.name && dir !== undefined && interaction.inGuild() && interaction.channel) {
+    if (interaction.commandName === STOP.name) {
+      const confirm = new ButtonBuilder().setCustomId(STOP_BUTTON).setLabel("Stop the bot").setStyle(ButtonStyle.Danger);
+      await interaction.reply({
+        content: "This stops the whole bot until someone starts it again.",
+        components: [new ActionRowBuilder<ButtonBuilder>().addComponents(confirm)],
+      });
+      return;
+    }
+    if (interaction.commandName === CLEAN.name && interaction.inGuild() && interaction.channel) {
       // The reply stays, as /clear's answer goes into it
       const reply = await interaction.deferReply({ withResponse: true });
       const cleaned = await clean(interaction.channel, reply.resource?.message?.id).catch(async (e) => {
@@ -122,27 +137,38 @@ export async function startBot(config: Config): Promise<never> {
       process.exit(RESTART_CODE);
     }
     if (interaction.commandName === RESTART.name) {
-      if (dir === undefined) {
-        await interaction.reply({ content: "This channel has no directory.", flags: MessageFlags.Ephemeral });
-        return;
-      }
       chats.chat(interaction.channelId, dir).stop();
       console.log(`restarted the session in ${dir}`);
       await interaction.reply("Session restarted; the next message resumes the conversation.");
       return;
     }
     const command = commands.get(interaction.commandName);
-    if (command === undefined || dir === undefined) {
-      const content = command === undefined ? "Unknown command." : "This channel has no directory.";
-      await interaction.reply({ content, flags: MessageFlags.Ephemeral });
+    if (command === undefined) {
+      await interaction.reply({ content: "Unknown command.", flags: MessageFlags.Ephemeral });
       return;
     }
     // Deferring buys 15 minutes to answer instead of 3 seconds
     await interaction.deferReply();
     chats.chat(interaction.channelId, dir).add([{ interaction, prompt: promptOf(command, interaction) }]);
   };
+  // Exit code 0, so index.ts doesn't start a new process
+  const stop = async (interaction: ButtonInteraction) => {
+    if (!config.discord.adminIds.includes(interaction.user.id)) {
+      await interaction.reply({ content: "Only admins can stop the bot.", flags: MessageFlags.Ephemeral });
+      return;
+    }
+    console.log(`stop requested by ${interaction.user.tag}`);
+    await interaction.update({ content: "Stopping the bot…", components: [] }).catch(() => {});
+    chats.stop();
+    await client.destroy();
+    process.exit(0);
+  };
   client.on(Events.InteractionCreate, (interaction) => {
-    if (interaction.guildId !== serverId) return;
+    // Other instances of the bot may serve other servers or channels with the
+    // same token, so whatever isn't in one of ours is theirs to answer
+    if (interaction.guildId !== serverId || !interaction.channel) return;
+    const dir = dirFor(interaction.channel);
+    if (dir === undefined) return;
     if (!allowed(interaction.user.id)) {
       // An interaction left unanswered shows as failed, so tell them why
       if (interaction.isRepliable()) {
@@ -151,8 +177,11 @@ export async function startBot(config: Config): Promise<never> {
       return;
     }
     if (interaction.isStringSelectMenu()) pick(interaction);
+    if (interaction.isButton() && interaction.customId === STOP_BUTTON) {
+      stop(interaction).catch((e) => console.error("stop failed:", e));
+    }
     if (!interaction.isChatInputCommand()) return;
-    runCommand(interaction).catch((e) => console.error(`/${interaction.commandName} failed:`, e));
+    runCommand(interaction, dir).catch((e) => console.error(`/${interaction.commandName} failed:`, e));
   });
 
   await client.login(token);
@@ -164,7 +193,7 @@ export async function startBot(config: Config): Promise<never> {
   // Listing needs a logged in Claude. Commands registered by an earlier run stay until then.
   authed
     .then(async () => {
-      const registered = toDiscord(await listCommands(config.dataDir, claudeHome(config)), [CLEAN, RESTART]);
+      const registered = toDiscord(await listCommands(config.dataDir, claudeHome(config)), [CLEAN, RESTART, STOP]);
       await guild.commands.set(registered.data);
       commands = registered.names;
       console.log(`registered ${registered.data.length} commands`);

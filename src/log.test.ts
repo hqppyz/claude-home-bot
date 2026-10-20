@@ -107,6 +107,7 @@ test("edits the last message and sends a new one when it overflows", async () =>
   const live = new LiveReply({
     send: async (content, i) => (calls.push(`send ${i} ${content.length}`), {} as Message),
     edit: async (_, content, i) => calls.push(`edit ${i} ${content.length}`),
+    report: async () => {},
   });
   live.add({ type: "system", subtype: "status" });
   live.add({ type: "assistant", message: { content: [{ type: "text", text: "x".repeat(1990) }] } });
@@ -120,6 +121,7 @@ test("puts a rule where log lines and Claude's text meet", async () => {
   const live = new LiveReply({
     send: async (content) => (sent.push(content), {} as Message),
     edit: async (_, content) => sent.push(content),
+    report: async () => {},
   });
   const text = (text: string) => ({ type: "assistant", message: { content: [{ type: "text", text }] } });
   const status = { type: "system", subtype: "status" };
@@ -133,10 +135,27 @@ test("edits a Bash call's message to add its output", async () => {
   const live = new LiveReply({
     send: async (content) => (sent.push(content), {} as Message),
     edit: async (_, content) => sent.push(content),
+    report: async () => {},
   });
   live.add({ type: "assistant", message: { content: [{ type: "tool_use", id: "b", name: "Bash", input: { command: "ls" } }] } });
   await live.settle();
   live.add({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "b", content: "a" }] } });
   await live.finish({ text: "", isError: false });
   expect(sent).toEqual(["-# bash\n```bash\n$ ls\n```", "-# bash\n```bash\n$ ls\na\n```"]);
+});
+
+test("reports a failed send once in the channel", async () => {
+  const reports: string[] = [];
+  const live = new LiveReply({
+    send: async () => {
+      throw new Error("Missing Permissions");
+    },
+    edit: async () => {},
+    report: async (content) => reports.push(content),
+  });
+  live.add({ type: "system", subtype: "status" });
+  await live.settle();
+  live.add({ type: "assistant", message: { content: [{ type: "text", text: "a" }] } });
+  await live.finish({ text: "a", isError: false });
+  expect(reports).toEqual(["Failed to send Claude's reply: Missing Permissions"]);
 });

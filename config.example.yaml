@@ -22,7 +22,7 @@ discord:
   token: CHANGEME # not needed when DISCORD_TOKEN is set
   server-id: '1234' # this is a single server bot
   admin-id: '1234' # a user id, a list of user ids, of people that can manage the bot
-  admin-only: false # when true, the bot ignores everyone but the admins
+  admin-only: true # the bot ignores everyone but the admins; false lets anyone in the server use it
 
 claude:
   permissions: manual # manual, acceptEdits, auto, bypassPermissions, dontAsk or plan
