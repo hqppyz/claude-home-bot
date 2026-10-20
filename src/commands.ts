@@ -1,10 +1,11 @@
 import {
   ApplicationCommandOptionType,
+  type ApplicationCommandAutocompleteStringOptionData,
   type ApplicationCommandStringOptionData,
   type ChatInputApplicationCommandData,
   type ChatInputCommandInteraction,
 } from "discord.js";
-import type { ClaudeCommand } from "./claude";
+import type { ClaudeCommand, ClaudeModel } from "./claude";
 
 // Discord's limits for chat input commands
 const MAX_COMMANDS = 100;
@@ -18,6 +19,22 @@ const ARGS = "args";
 
 // The option for a placeholder that's only a set of choices, like "[on|off]"
 const VALUE = "value";
+
+export interface Suggestion {
+  readonly name: string;
+  readonly value: string;
+}
+
+export type Suggestions = Readonly<Record<string, readonly Suggestion[]>>;
+
+export function suggestionsOf(listed: { readonly models: readonly ClaudeModel[] }): Suggestions {
+  return {
+    model: listed.models.map((m) => ({ name: `${m.displayName} (${m.value})`.slice(0, MAX_DESCRIPTION), value: m.value })),
+  };
+}
+
+export const suggest = (options: readonly Suggestion[], typed: string): Suggestion[] =>
+  options.filter((o) => `${o.name} ${o.value}`.toLowerCase().includes(typed.toLowerCase())).slice(0, MAX_CHOICES);
 
 const truncate = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
 
@@ -84,7 +101,11 @@ function argsOf(command: ClaudeCommand): Arg[] {
 }
 
 // The bot's own commands go first and win over Claude commands of the same name
-export function toDiscord(commands: readonly ClaudeCommand[], own: readonly ChatInputApplicationCommandData[] = []): Registered {
+export function toDiscord(
+  commands: readonly ClaudeCommand[],
+  own: readonly ChatInputApplicationCommandData[] = [],
+  suggestions: Suggestions = {},
+): Registered {
   const data: ChatInputApplicationCommandData[] = [...own];
   const names: Registered["names"] = new Map();
   const taken = new Set(own.map((c) => c.name));
@@ -101,13 +122,11 @@ export function toDiscord(commands: readonly ClaudeCommand[], own: readonly Chat
       name,
       description: truncate(command.description.trim() || `/${command.name}`, MAX_DESCRIPTION),
       options: args.map(
-        (arg): ApplicationCommandStringOptionData => ({
-          type: ApplicationCommandOptionType.String,
-          name: arg.name,
-          description: truncate(arg.description, MAX_DESCRIPTION),
-          required: arg.required,
-          choices: arg.choices?.map((c) => ({ name: c, value: c })),
-        }),
+        (arg): ApplicationCommandStringOptionData | ApplicationCommandAutocompleteStringOptionData => {
+          const base = { type: ApplicationCommandOptionType.String as const, name: arg.name, description: truncate(arg.description, MAX_DESCRIPTION), required: arg.required };
+          if (arg.choices) return { ...base, choices: arg.choices.map((c) => ({ name: c, value: c })) };
+          return arg.name in suggestions ? { ...base, autocomplete: true } : base;
+        },
       ),
     });
   }

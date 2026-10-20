@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { Config, Effort, PermissionMode } from "./config";
 import type { RawEvent } from "./log";
@@ -7,6 +7,20 @@ import type { RawEvent } from "./log";
 // so pointing it into the data dir keeps the bot's sessions out of the user's ~/.claude.
 export function claudeHome(config: Config): string {
   return join(config.dataDir, ".claude");
+}
+
+// Copies <data>/CLAUDE.md, if there is one, into the Claude home, where Claude
+// reads it as its user-level instructions. A symlink is followed, and a copy
+// Claude changed is overwritten. Without a source, an earlier copy is removed.
+export async function installClaudeMd(config: Config): Promise<void> {
+  const source = Bun.file(join(config.dataDir, "CLAUDE.md"));
+  const target = join(claudeHome(config), "CLAUDE.md");
+  if (await source.exists()) {
+    await mkdir(claudeHome(config), { recursive: true });
+    await Bun.write(target, source);
+  } else {
+    await rm(target, { force: true });
+  }
 }
 
 // Whether credentials exist in the bot's Claude home. Doesn't validate them,
@@ -95,6 +109,12 @@ export interface Reply {
   readonly isError: boolean;
 }
 
+export interface ClaudeModel {
+  readonly value: string;
+  readonly displayName: string;
+  readonly description: string;
+}
+
 export interface ClaudeCommand {
   readonly name: string;
   readonly description: string;
@@ -128,7 +148,7 @@ interface Event {
     subtype?: string;
     request_id?: string;
     error?: string;
-    response?: { commands?: ClaudeCommand[] };
+    response?: { commands?: ClaudeCommand[]; models?: ClaudeModel[] };
   };
 }
 
@@ -148,9 +168,9 @@ async function* events(stdout: ReadableStream<Uint8Array>): AsyncGenerator<Event
   }
 }
 
-// The slash commands a session in dir can run. The initialize control request
-// answers without starting a turn, so this costs no tokens.
-export async function listCommands(dir: string, home: string): Promise<ClaudeCommand[]> {
+// The slash commands and models a session in dir can use. The initialize
+// control request answers without starting a turn, so this costs no tokens.
+export async function listCommands(dir: string, home: string): Promise<{ commands: ClaudeCommand[]; models: ClaudeModel[] }> {
   await mkdir(home, { recursive: true });
   const proc = Bun.spawn(["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"], {
     cwd: dir,
@@ -166,7 +186,7 @@ export async function listCommands(dir: string, home: string): Promise<ClaudeCom
       const { response } = event;
       if (event.type !== "control_response" || response?.request_id !== "commands") continue;
       if (response.subtype !== "success") throw new Error(`claude refused to list its commands: ${response.error}`);
-      return response.response?.commands ?? [];
+      return { commands: response.response?.commands ?? [], models: response.response?.models ?? [] };
     }
     throw new Error("claude exited without listing its commands");
   } finally {

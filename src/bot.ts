@@ -20,7 +20,7 @@ import { clean } from "./clean";
 import { authenticate } from "./auth";
 import { Chats } from "./chats";
 import { claudeHome, listCommands } from "./claude";
-import { promptOf, toDiscord, type Registered } from "./commands";
+import { promptOf, suggest, suggestionsOf, toDiscord, type Registered, type Suggestions } from "./commands";
 import type { AutoEntry, Config, PathConfig } from "./config";
 import { includeIndex } from "./dirs";
 import { RESTART_CODE } from "./restart";
@@ -100,6 +100,7 @@ export async function startBot(config: Config): Promise<never> {
 
   // Discord command name to Claude command, filled once they're registered
   let commands: Registered["names"] = new Map();
+  let suggestions: Suggestions = {};
   const runCommand = async (interaction: ChatInputCommandInteraction, dir: string) => {
     // The bot's own commands wipe, restart or stop things, so they're for admins even without admin-only
     const own = [CLEAN.name, RESTART.name, STOP.name].includes(interaction.commandName);
@@ -180,6 +181,11 @@ export async function startBot(config: Config): Promise<never> {
     if (interaction.isButton() && interaction.customId === STOP_BUTTON) {
       stop(interaction).catch((e) => console.error("stop failed:", e));
     }
+    if (interaction.isAutocomplete()) {
+      const { name, value } = interaction.options.getFocused(true);
+      interaction.respond(suggest(suggestions[name] ?? [], value)).catch(() => {});
+      return;
+    }
     if (!interaction.isChatInputCommand()) return;
     runCommand(interaction, dir).catch((e) => console.error(`/${interaction.commandName} failed:`, e));
   });
@@ -193,9 +199,12 @@ export async function startBot(config: Config): Promise<never> {
   // Listing needs a logged in Claude. Commands registered by an earlier run stay until then.
   authed
     .then(async () => {
-      const registered = toDiscord(await listCommands(config.dataDir, claudeHome(config)), [CLEAN, RESTART, STOP]);
+      const listed = await listCommands(config.dataDir, claudeHome(config));
+      const found = suggestionsOf(listed);
+      const registered = toDiscord(listed.commands, [CLEAN, RESTART, STOP], found);
       await guild.commands.set(registered.data);
       commands = registered.names;
+      suggestions = found;
       console.log(`registered ${registered.data.length} commands`);
     })
     .catch((e) => console.error("failed to register commands:", e));

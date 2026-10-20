@@ -25,6 +25,10 @@ On first run the bot DMs the admins a link to log claude in.
 
 Every config key can also come from the environment: `DISCORD_TOKEN`, `DISCORD_SERVER_ID`, `PATHS`, …
 
+## CLAUDE.md
+
+If `<data>/CLAUDE.md` exists, the bot copies it to `<data>/.claude/CLAUDE.md` whenever a session starts, so Claude reads it as its user-level instructions. Edits Claude makes to the copy last until the next session. A symlink works, e.g. `ln -s ~/.claude/CLAUDE.md data/CLAUDE.md`. Without the file, no instructions are installed.
+
 ## Commands
 
 Claude's slash commands work as Discord commands. The bot adds three, for admins only:
