@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { Message, type ChatInputCommandInteraction, type SendableChannels } from "discord.js";
 import { Asking } from "./ask";
 import { showUsage } from "./presence";
-import { claudeHome, installClaudeMd, Session, type Ask, type Reply } from "./claude";
+import { claudeHome, installClaudeMd, installSettings, Session, type Ask, type Reply } from "./claude";
 import { permissionsFor, type Config, type Effort, type PermissionMode } from "./config";
 import { withStatus, type Status } from "./channels";
 import { cost, effortSet, isThinking, LiveReply, session, type Outlet, type RawEvent } from "./log";
@@ -154,8 +154,9 @@ export class Chats {
     readonly ready: Promise<unknown>,
   ) {}
 
-  installClaudeMd(): Promise<void> {
-    return installClaudeMd(this.config);
+  async install(): Promise<void> {
+    await installClaudeMd(this.config);
+    await installSettings(this.config);
   }
 
   static async load(config: Config, ready: Promise<unknown>): Promise<Chats> {
@@ -295,7 +296,7 @@ export class Chat {
     const saved = this.chats.get(this.channelId);
     // Claude keeps conversations per project directory, so a new directory starts over
     if (!this.session) {
-      await this.chats.installClaudeMd();
+      await this.chats.install();
       this.session = await Session.start(this.dir, this.home, this.startEffort, this.mode, saved?.dir === this.dir ? saved.sessionId : undefined);
       this.effort = this.startEffort;
     }

@@ -23,6 +23,30 @@ export async function installClaudeMd(config: Config): Promise<void> {
   }
 }
 
+// Applies patch to target as a JSON Merge Patch (RFC 7396): objects merge
+// key by key, null removes a key, and any other value replaces the old one.
+function mergePatch(target: unknown, patch: unknown): unknown {
+  if (typeof patch !== "object" || patch === null || Array.isArray(patch)) return patch;
+  const result: Record<string, unknown> =
+    typeof target === "object" && target !== null && !Array.isArray(target) ? { ...target } : {};
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === null) delete result[key];
+    else result[key] = mergePatch(result[key], value);
+  }
+  return result;
+}
+
+// Merges <data>/settings.json, if there is one, into the Claude home's
+// settings.json, so keys it names win and keys Claude set itself stay.
+export async function installSettings(config: Config): Promise<void> {
+  const source = Bun.file(join(config.dataDir, "settings.json"));
+  if (!(await source.exists())) return;
+  const target = Bun.file(join(claudeHome(config), "settings.json"));
+  const current = (await target.exists()) ? await target.json() : {};
+  await mkdir(claudeHome(config), { recursive: true });
+  await Bun.write(target, `${JSON.stringify(mergePatch(current, await source.json()), null, 2)}\n`);
+}
+
 // Whether credentials exist in the bot's Claude home. Doesn't validate them,
 // but never starts a session.
 export async function checkAuth(config: Config): Promise<boolean> {

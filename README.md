@@ -29,6 +29,17 @@ Every config key can also come from the environment: `DISCORD_TOKEN`, `DISCORD_S
 
 If `<data>/CLAUDE.md` exists, the bot copies it to `<data>/.claude/CLAUDE.md` whenever a session starts, so Claude reads it as its user-level instructions. Edits Claude makes to the copy last until the next session. A symlink works, e.g. `ln -s ~/.claude/CLAUDE.md data/CLAUDE.md`. Without the file, no instructions are installed.
 
+## settings.json
+
+If `<data>/settings.json` exists, the bot merges it into `<data>/.claude/settings.json` whenever a session starts. The merge follows JSON Merge Patch (RFC 7396): objects merge key by key, other values (arrays included) replace the old ones, and keys the file doesn't name stay as they are. Set a key to `null` to remove it:
+
+```json
+{
+  "model": "opus",
+  "env": { "DEBUG": null }
+}
+```
+
 ## Commands
 
 Claude's slash commands work as Discord commands. The bot adds three, for admins only:
