@@ -88,9 +88,9 @@ function str(v: unknown, where: string): string {
   return v;
 }
 
-// Optional, false by default. From env, "true" or "false".
-function bool(v: unknown, where: string): boolean {
-  if (v === undefined || v === null) return false;
+// Optional, fallback when missing. From env, "true" or "false".
+function bool(v: unknown, where: string, fallback: boolean): boolean {
+  if (v === undefined || v === null) return fallback;
   if (typeof v === "string" && where.startsWith("DISCORD_")) v = { true: true, false: false }[v.trim().toLowerCase()] ?? v;
   if (typeof v !== "boolean") fail(where, "expected true or false");
   return v;
@@ -214,7 +214,7 @@ export async function loadConfig(dataDir: string): Promise<Config> {
       token: str(...pick(discord, ["discord", "token"])),
       serverId: snowflake(...pick(discord, ["discord", "server-id"])),
       adminIds: snowflakes(...pick(discord, ["discord", "admin-id"])),
-      adminOnly: bool(...pick(discord, ["discord", "admin-only"])),
+      adminOnly: bool(...pick(discord, ["discord", "admin-only"]), true),
     },
     claude: {
       effort: effort(...pick(claude, ["claude", "effort"])),
