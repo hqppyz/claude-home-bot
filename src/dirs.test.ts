@@ -16,8 +16,8 @@ beforeAll(async () => {
 afterAll(() => rm(root, { recursive: true }));
 
 const auto = (include: string[] = [], exclude: string[] = []): PathConfig =>
-  ({ path: root, mode: "auto", categoryId: "1", include, exclude });
-const manual = (path = root): PathConfig => ({ path, mode: "manual", channelId: "1" });
+  ({ path: root, args: [], env: {}, mode: "auto", categoryId: "1", include, exclude });
+const manual = (path = root): PathConfig => ({ path, args: [], env: {}, mode: "manual", channelId: "1" });
 const rel = (dirs: string[]) => dirs.map((d) => (d === root ? "." : d.slice(root.length + 1)));
 
 test("manual: the path itself", async () => {

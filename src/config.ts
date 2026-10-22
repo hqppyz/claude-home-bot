@@ -3,8 +3,14 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 // auto: one channel per directory matched by include - exclude, under a category
 // or, without one, at the top of the server.
 // manual: the path itself, linked to an existing channel.
-// permissions, when set, replaces claude.permissions for the entry's sessions.
-export type PathConfig = { readonly path: string; readonly permissions?: PermissionMode } & (
+// permissions, when set, replaces claude.permissions for the entry's sessions;
+// args go after claude.args, and env merges over claude.env.
+export type PathConfig = {
+  readonly path: string;
+  readonly permissions?: PermissionMode;
+  readonly args: readonly string[];
+  readonly env: Readonly<Record<string, string>>;
+} & (
   | {
       readonly mode: "auto";
       readonly categoryId?: string;
@@ -41,6 +47,9 @@ export interface Config {
     readonly effort: Effort;
     // Each session's permission mode
     readonly permissions: PermissionMode;
+    // Extra `claude` arguments and environment for every session
+    readonly args: readonly string[];
+    readonly env: Readonly<Record<string, string>>;
   };
 }
 
@@ -116,6 +125,22 @@ function patterns(v: unknown, where: string): readonly string[] {
   return v.map((p, i) => str(p, `${where}[${i}]`));
 }
 
+// Optional list of strings. From env, YAML, e.g. CLAUDE_ARGS='[--foo, bar]'.
+function args(v: unknown, where: string): readonly string[] {
+  if (v === undefined || v === null) return [];
+  if (typeof v === "string" && where === envName(["claude", "args"])) v = Bun.YAML.parse(v);
+  if (!Array.isArray(v)) fail(where, "expected a list");
+  return v.map((arg, i) => str(arg, `${where}[${i}]`));
+}
+
+// Optional mapping of strings. From env, YAML, e.g. CLAUDE_ENV='{FOO: bar}'.
+function env(v: unknown, where: string): Readonly<Record<string, string>> {
+  if (v === undefined || v === null) return {};
+  if (typeof v === "string" && where === envName(["claude", "env"])) v = Bun.YAML.parse(v);
+  if (!isRecord(v)) fail(where, "expected a mapping");
+  return Object.fromEntries(Object.entries(v).map(([key, value]) => [key, str(value, `${where}.${key}`)]));
+}
+
 // Optional; a single ID or a list. From env, a comma-separated list.
 function snowflakes(v: unknown, where: string): readonly string[] {
   if (v === undefined || v === null) return [];
@@ -133,21 +158,21 @@ function parsePath(entry: unknown, where: string): PathConfig {
   if (!isAbsolute(path)) fail(where, "path must be absolute");
   if (!isRecord(opts)) fail(where, "expected a mapping");
   const permissions = opts.permissions == null ? undefined : permissionMode(opts.permissions, `${where}.permissions`);
+  const common = { path, permissions, args: args(opts.args, `${where}.args`), env: env(opts.env, `${where}.env`) };
 
   switch (opts.mode) {
     case "auto":
-      checkKeys(opts, ["mode", "category_id", "include", "exclude", "permissions"], where);
+      checkKeys(opts, ["mode", "category_id", "include", "exclude", "permissions", "args", "env"], where);
       return {
-        path,
-        permissions,
+        ...common,
         mode: "auto",
         categoryId: opts.category_id == null ? undefined : snowflake(opts.category_id, `${where}.category_id`),
         include: patterns(opts.include, `${where}.include`),
         exclude: patterns(opts.exclude, `${where}.exclude`),
       };
     case "manual":
-      checkKeys(opts, ["mode", "channel_id", "permissions"], where);
-      return { path, permissions, mode: "manual", channelId: snowflake(opts.channel_id, `${where}.channel_id`) };
+      checkKeys(opts, ["mode", "channel_id", "permissions", "args", "env"], where);
+      return { ...common, mode: "manual", channelId: snowflake(opts.channel_id, `${where}.channel_id`) };
     default:
       fail(`${where}.mode`, 'expected "auto" or "manual"');
   }
@@ -175,7 +200,7 @@ export async function loadConfig(dataDir: string): Promise<Config> {
 
   const claude = raw.claude ?? {};
   if (!isRecord(claude)) fail("claude", "expected a mapping");
-  checkKeys(claude, ["effort", "permissions"], "claude");
+  checkKeys(claude, ["effort", "permissions", "args", "env"], "claude");
 
   // PATHS holds the whole list as YAML, e.g. PATHS='[{/home/me: {mode: manual}}]'
   let [paths, pathsWhere] = pick(raw, ["paths"]);
@@ -194,14 +219,27 @@ export async function loadConfig(dataDir: string): Promise<Config> {
     claude: {
       effort: effort(...pick(claude, ["claude", "effort"])),
       permissions: permissionMode(...pick(claude, ["claude", "permissions"])),
+      args: args(...pick(claude, ["claude", "args"])),
+      env: env(...pick(claude, ["claude", "env"])),
     },
   });
 }
 
-// The permission mode for a session in dir: that of the deepest entry holding
-// it, falling back to claude.permissions
-export function permissionsFor(config: Config, dir: string): PermissionMode {
+// How a session in dir runs
+export interface Launch {
+  readonly permissions: PermissionMode;
+  readonly args: readonly string[];
+  readonly env: Readonly<Record<string, string>>;
+}
+
+// The launch for a session in dir: the deepest entry holding it adds to the
+// claude section, and its permissions replace claude.permissions
+export function launchFor(config: Config, dir: string): Launch {
   const holds = (entry: PathConfig) => !relative(entry.path, dir).startsWith("..");
   const entry = config.paths.filter(holds).sort((a, b) => b.path.length - a.path.length)[0];
-  return entry?.permissions ?? config.claude.permissions;
+  return {
+    permissions: entry?.permissions ?? config.claude.permissions,
+    args: [...config.claude.args, ...(entry?.args ?? [])],
+    env: { ...config.claude.env, ...entry?.env },
+  };
 }

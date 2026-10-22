@@ -87,7 +87,8 @@ export async function startBot(config: Config): Promise<never> {
   };
 
   const { promise: authed, resolve: authDone } = Promise.withResolvers<void>();
-  const chats = await Chats.load(config, authed);
+  // Sessions start from messages, so the bot is logged in by then
+  const chats = await Chats.load(config, authed, () => client.user?.username ?? "");
 
   // discord.js waits out a rate limit silently, so log it
   client.rest.on("rateLimited", (info) => console.error(`rate limited on ${info.route} for ${info.retryAfter}ms`));

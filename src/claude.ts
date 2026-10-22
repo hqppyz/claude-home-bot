@@ -1,6 +1,6 @@
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
-import type { Config, Effort, PermissionMode } from "./config";
+import type { Config, Effort, Launch } from "./config";
 import type { RawEvent } from "./log";
 
 // Claude Code keeps settings, credentials and transcripts under CLAUDE_CONFIG_DIR,
@@ -12,12 +12,15 @@ export function claudeHome(config: Config): string {
 // Copies <data>/CLAUDE.md, if there is one, into the Claude home, where Claude
 // reads it as its user-level instructions. A symlink is followed, and a copy
 // Claude changed is overwritten. Without a source, an earlier copy is removed.
-export async function installClaudeMd(config: Config): Promise<void> {
+// {{DATA_DIR}} and {{BOT_NAME}} are filled in; other {{...}} stay as written.
+export async function installClaudeMd(config: Config, botName: string): Promise<void> {
   const source = Bun.file(join(config.dataDir, "CLAUDE.md"));
   const target = join(claudeHome(config), "CLAUDE.md");
   if (await source.exists()) {
+    const values: Record<string, string> = { DATA_DIR: config.dataDir, BOT_NAME: botName };
+    const text = (await source.text()).replace(/\{\{(\w+)\}\}/g, (match, name: string) => values[name] ?? match);
     await mkdir(claudeHome(config), { recursive: true });
-    await Bun.write(target, source);
+    await Bun.write(target, text);
   } else {
     await rm(target, { force: true });
   }
@@ -218,27 +221,6 @@ export async function listCommands(dir: string, home: string): Promise<{ command
   }
 }
 
-// Settings that keep each request small: no skills synced from claude.ai, and
-// built-in skills a chat has little use for kept out of Claude's listing,
-// though they still run as slash commands
-const SETTINGS = {
-  syncClaudeAiSkills: false,
-  syncClaudeAiPlugins: false,
-  skillOverrides: Object.fromEntries(
-    [
-      "dataviz",
-      "claude-api",
-      "run",
-      "plugin-authoring",
-      "security-review",
-      "keybindings-help",
-      "fewer-permission-prompts",
-      "update-config",
-      "loop",
-    ].map((name) => [name, "user-invocable-only"]),
-  ),
-};
-
 // One running `claude` process. It reads turns from stdin until it's closed, so
 // the conversation stays loaded between messages; --resume continues an
 // earlier one in a new process.
@@ -267,21 +249,18 @@ export class Session {
     this.read().catch((e) => console.error("failed to read claude output:", e));
   }
 
-  static async start(dir: string, home: string, effort: Effort, mode: PermissionMode, resume?: string): Promise<Session> {
+  static async start(dir: string, home: string, effort: Effort, launch: Launch, resume?: string): Promise<Session> {
     await mkdir(home, { recursive: true });
     // Tool calls the mode doesn't approve come to stdin as can_use_tool
     // requests, which is how AskUserQuestion is answered
     const args = ["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"];
-    args.push("--permission-mode", mode, "--permission-prompt-tool", "stdio");
-    // Tools a chat in Discord has no use for, left out to keep each request small
-    args.push("--disallowedTools", "ReportFindings", "ListAgents", "ScheduleWakeup");
-    args.push("--settings", JSON.stringify(SETTINGS));
+    args.push("--permission-mode", launch.permissions, "--permission-prompt-tool", "stdio");
     args.push("--effort", effort);
     if (resume) args.push("--resume", resume);
+    args.push(...launch.args);
     const proc = Bun.spawn(args, {
       cwd: dir,
-      // The claude.ai connectors (Claude Docs and the like) ride along on every request otherwise
-      env: { ...Bun.env, CLAUDE_CONFIG_DIR: home, ENABLE_CLAUDEAI_MCP_SERVERS: "false" },
+      env: { ...Bun.env, ...launch.env, CLAUDE_CONFIG_DIR: home },
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",

@@ -1,3 +1,5 @@
 node_modules
 .env
-data
+data/.claude
+data/chats.json
+data/channels.json

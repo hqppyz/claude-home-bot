@@ -14,7 +14,7 @@ beforeEach(async () => {
 afterEach(() => rm(root, { recursive: true, force: true }));
 
 const auto = (include: string[], exclude: string[] = []): PathConfig =>
-  ({ path: root, mode: "auto", categoryId: "1", include, exclude });
+  ({ path: root, args: [], env: {}, mode: "auto", categoryId: "1", include, exclude });
 
 async function next(events: AsyncGenerator<DirEvent>, timeoutMs = 2000): Promise<string> {
   const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timed out")), timeoutMs));
@@ -63,7 +63,7 @@ test("watches pattern prefixes, including ones created later", async () => {
 
 test("manual: the path itself appearing and disappearing", async () => {
   const path = join(root, "m");
-  const events = watchDirs([{ path, mode: "manual", channelId: "1" }]);
+  const events = watchDirs([{ path, args: [], env: {}, mode: "manual", channelId: "1" }]);
   expect(await next(events)).toBe("ready"); // path missing, nothing yet
 
   await mkdir(join(root, "other")); // sibling, ignored

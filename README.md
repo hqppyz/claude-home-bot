@@ -17,17 +17,21 @@ Needs [bun](https://bun.com) and the `claude` CLI on `PATH`.
 
    ```bash
    bun install
-   mkdir data && cp config.example.yaml data/config.yaml  # then edit it
-   bun run index.ts --data ./data
+   cp -r data ~/.claude-bot  # then edit ~/.claude-bot/config.yaml
+   bun run index.ts --data ~/.claude-bot
    ```
 
 On first run the bot DMs the admins a link to log claude in.
 
-Every config key can also come from the environment: `DISCORD_TOKEN`, `DISCORD_SERVER_ID`, `PATHS`, …
+Every config key can also come from the environment: `DISCORD_TOKEN`, `DISCORD_SERVER_ID`, `PATHS`, `CLAUDE_ARGS`, …
+
+`data/` is the default data dir: `config.yaml`, `CLAUDE.md` and `settings.json`, all optional to keep. Running the bot with `--data ./data` works too; what it writes there is git-ignored.
 
 ## CLAUDE.md
 
-If `<data>/CLAUDE.md` exists, the bot copies it to `<data>/.claude/CLAUDE.md` whenever a session starts, so Claude reads it as its user-level instructions. Edits Claude makes to the copy last until the next session. A symlink works, e.g. `ln -s ~/.claude/CLAUDE.md data/CLAUDE.md`. Without the file, no instructions are installed.
+If `<data>/CLAUDE.md` exists, the bot copies it to `<data>/.claude/CLAUDE.md` whenever a session starts, so Claude reads it as its user-level instructions. Edits Claude makes to the copy last until the next session. A symlink works, e.g. `ln -s ~/.claude/CLAUDE.md ~/.claude-bot/CLAUDE.md`. Without the file, no instructions are installed.
+
+The copy fills in `{{DATA_DIR}}`, the data dir's absolute path, and `{{BOT_NAME}}`, the bot's Discord username. Other `{{...}}` stay as written.
 
 ## settings.json
 
@@ -50,14 +54,19 @@ Claude's slash commands work as Discord commands. The bot adds three, for admins
 
 ## Trimmed sessions
 
-To keep each request small, sessions run with less than a plain `claude` (`src/claude.ts`):
+To keep each request small, the default data dir runs sessions with less than a plain `claude`:
 
-- No claude.ai connectors (`ENABLE_CLAUDEAI_MCP_SERVERS=false`)
-- No skills or plugins synced from claude.ai
-- Tools a Discord chat has no use for are disabled: `ReportFindings`, `ListAgents`, `ScheduleWakeup`
-- Built-in skills hidden from Claude, still runnable as slash commands: `dataviz`, `claude-api`, `run`, `plugin-authoring`, `security-review`, `keybindings-help`, `fewer-permission-prompts`, `update-config`, `loop`
+- `config.yaml`, under `claude.env`: no claude.ai connectors (`ENABLE_CLAUDEAI_MCP_SERVERS=false`)
+- `config.yaml`, under `claude.args`: tools a Discord chat has no use for are disabled: `ReportFindings`, `ListAgents`, `ScheduleWakeup`
+- `settings.json`: no skills or plugins synced from claude.ai
+- `settings.json`: built-in skills hidden from Claude, still runnable as slash commands: `dataviz`, `claude-api`, `run`, `plugin-authoring`, `security-review`, `keybindings-help`, `fewer-permission-prompts`, `update-config`, `loop`
 
-This is currently not configurable.
+## Your ~/.claude
+
+Sessions use `<data>/.claude` as their Claude home, not `~/.claude`. Claude still finds `~/.claude` as project config in two ways:
+
+- A session in your home directory loads it as its project `.claude`: settings, skills, agents and CLAUDE.md. The example config passes `--setting-sources user` to the home entry, which skips project and local settings.
+- A session in a subdirectory loads `~/.claude/CLAUDE.md` and `~/.claude/rules` while walking up for CLAUDE.md files. The default `settings.json` excludes them with `claudeMdExcludes`.
 
 ## License
 

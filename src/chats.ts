@@ -3,7 +3,7 @@ import { Message, type ChatInputCommandInteraction, type SendableChannels } from
 import { Asking } from "./ask";
 import { showUsage } from "./presence";
 import { claudeHome, installClaudeMd, installSettings, Session, type Ask, type Reply } from "./claude";
-import { permissionsFor, type Config, type Effort, type PermissionMode } from "./config";
+import { launchFor, type Config, type Effort, type Launch } from "./config";
 import { withStatus, type Status } from "./channels";
 import { cost, effortSet, isThinking, LiveReply, session, type Outlet, type RawEvent } from "./log";
 
@@ -152,18 +152,20 @@ export class Chats {
     private readonly saved: Map<string, Saved>,
     // Turns wait for this, so messages sent before Claude is logged in queue up
     readonly ready: Promise<unknown>,
+    // The bot's Discord username, for CLAUDE.md's {{BOT_NAME}}
+    private readonly botName: () => string,
   ) {}
 
   async install(): Promise<void> {
-    await installClaudeMd(this.config);
+    await installClaudeMd(this.config, this.botName());
     await installSettings(this.config);
   }
 
-  static async load(config: Config, ready: Promise<unknown>): Promise<Chats> {
+  static async load(config: Config, ready: Promise<unknown>, botName: () => string): Promise<Chats> {
     const path = join(config.dataDir, "chats.json");
     const file = Bun.file(path);
     const saved: Record<string, Saved> = (await file.exists()) ? await file.json() : {};
-    return new Chats(config, path, new Map(Object.entries(saved)), ready);
+    return new Chats(config, path, new Map(Object.entries(saved)), ready, botName);
   }
 
   get(channelId: string): Saved | undefined {
@@ -183,7 +185,7 @@ export class Chats {
 
   chat(channelId: string, dir: string): Chat {
     let chat = this.chats.get(channelId);
-    if (!chat) this.chats.set(channelId, (chat = new Chat(this, channelId, dir, claudeHome(this.config), this.config.claude.effort, permissionsFor(this.config, dir))));
+    if (!chat) this.chats.set(channelId, (chat = new Chat(this, channelId, dir, claudeHome(this.config), this.config.claude.effort, launchFor(this.config, dir))));
     return chat;
   }
 
@@ -214,7 +216,7 @@ export class Chat {
     readonly dir: string,
     private readonly home: string,
     private readonly startEffort: Effort,
-    private readonly mode: PermissionMode,
+    private readonly launch: Launch,
   ) {
     this.effort = startEffort;
   }
@@ -297,7 +299,7 @@ export class Chat {
     // Claude keeps conversations per project directory, so a new directory starts over
     if (!this.session) {
       await this.chats.install();
-      this.session = await Session.start(this.dir, this.home, this.startEffort, this.mode, saved?.dir === this.dir ? saved.sessionId : undefined);
+      this.session = await Session.start(this.dir, this.home, this.startEffort, this.launch, saved?.dir === this.dir ? saved.sessionId : undefined);
       this.effort = this.startEffort;
     }
     const session = this.session;
